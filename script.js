@@ -3696,125 +3696,133 @@ function printReceipt(idx){
   const f=D.fees[idx];
   if(!f){toast('Receipt not found');return;}
   const stu=D.students.find(s=>s.roll===f.roll)||{};
-  const instInitials=getInstInitials();
   const logoBadge=getLogoBadgeInner();
-  // instalment rows
-  let instRows='';
+  const hasRealLogo=!!D.settings.logoDataUrl;
+
+  // ── Instalment math: how much THIS payment covers, and what's left ──
+  let instLines='', feeLabel='TUITION FEE — FULL PAYMENT';
   if(f.isInstalment&&f.instTotal){
     const allInst=D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal);
     const paidCount=allInst.filter(x=>x.status==='Paid').length;
     const paidAmt=allInst.filter(x=>x.status==='Paid').reduce((a,b)=>a+b.amt,0);
-    const pendAmt=f.instTotal-paidAmt;
-    const pct=Math.round((paidAmt/f.instTotal)*100);
-    instRows='<div class="inst-box">'
-      +'<div class="inst-box-h">📋 Instalment Plan</div>'
-      +'<div class="pay-row"><div class="pr-k">This Instalment</div><div class="pr-v" style="color:#0d3b1e">'+(f.instPart||'')+'</div></div>'
-      +'<div class="pay-row"><div class="pr-k">Instalments Paid</div><div class="pr-v" style="color:#16a34a">'+paidCount+' of '+allInst.length+'</div></div>'
-      +'<div class="pay-row"><div class="pr-k">Total Fee</div><div class="pr-v">Rs '+f.instTotal.toLocaleString()+'</div></div>'
-      +'<div class="pay-row"><div class="pr-k">Paid So Far</div><div class="pr-v" style="color:#16a34a">Rs '+paidAmt.toLocaleString()+'</div></div>'
-      +(pendAmt>0?'<div class="pay-row"><div class="pr-k">Remaining</div><div class="pr-v" style="color:#ef4444">Rs '+pendAmt.toLocaleString()+'</div></div>':'<div class="pay-row"><div class="pr-k">Status</div><div class="pr-v" style="color:#16a34a">✅ All cleared!</div></div>')
-      +'<div class="inst-bar"><div class="inst-bar-fill" style="width:'+pct+'%"></div></div>'
-      +'<div style="font-size:10px;color:#15803d;text-align:right">'+pct+'% Complete</div>'
-      +'</div>';
+    const pendAmt=Math.max(0,f.instTotal-paidAmt);
+    feeLabel=`TUITION FEE — INSTALMENT ${f.instPart||''}`.trim();
+    instLines=
+       li('Total Fee (Full Year)','Rs. '+f.instTotal.toLocaleString())
+      +li('Instalments Paid',paidCount+' of '+allInst.length)
+      +li('Paid So Far (incl. this receipt)','Rs. '+paidAmt.toLocaleString())
+      +li('Remaining Balance', pendAmt>0 ? 'Rs. '+pendAmt.toLocaleString() : 'Rs. 0 — Fully Paid');
   }
-  const h='<html><head><meta charset="UTF-8"><style>'
-    +'@import url(\'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap\');'
-    +'*{box-sizing:border-box;margin:0;padding:0;}'
-    +'body{font-family:\'Inter\',Arial,sans-serif;background:linear-gradient(135deg,#0a2e1a 0%,#0d3b1e 100%);min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:24px;}'
-    +'.wrap{width:100%;max-width:520px;}'
-    +'.card{background:#fff;border-radius:20px;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.4);}'
-    +'/* HEADER */'
-    +'.hdr{background:linear-gradient(135deg,#0d3b1e 0%,#1a6636 60%,#20954a 100%);padding:28px 28px 20px;position:relative;overflow:hidden;}'
-    +'.hdr::before{content:attr(data-wm);position:absolute;right:-10px;top:-15px;font-size:100px;font-weight:900;color:rgba(255,255,255,.04);line-height:1;font-family:Georgia,serif;}'
-    +'.hdr-top{display:flex;align-items:center;gap:14px;margin-bottom:18px;}'
-    +'.hdr-logo{width:52px;height:52px;background:rgba(255,255,255,.15);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:900;color:#c9a227;font-family:Georgia,serif;border:2px solid rgba(255,255,255,.2);flex-shrink:0;}'
-    +'.hdr-title h1{font-size:18px;font-weight:800;color:#fff;letter-spacing:.3px;}'
-    +'.hdr-title p{font-size:10px;color:rgba(255,255,255,.55);letter-spacing:2px;text-transform:uppercase;margin-top:2px;}'
-    +'.hdr-badge{margin-left:auto;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;font-size:9px;font-weight:800;letter-spacing:1.5px;padding:5px 12px;border-radius:50px;text-transform:uppercase;white-space:nowrap;}'
-    +'.paid-badge{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;font-size:9px;font-weight:800;letter-spacing:1.5px;padding:5px 12px;border-radius:50px;text-transform:uppercase;white-space:nowrap;background:#16a34a;border-color:#16a34a;}'
-    +'/* AMOUNT HERO */'
-    +'.amt-hero{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;}'
-    +'.amt-main{font-size:36px;font-weight:900;color:#fff;line-height:1;}'
-    +'.amt-main span{font-size:16px;font-weight:600;opacity:.7;margin-right:4px;}'
-    +'.amt-lbl{font-size:10px;color:rgba(255,255,255,.5);margin-top:3px;letter-spacing:.5px;}'
-    +'.stamp-paid{background:#fff;color:#0d3b1e;font-size:12px;font-weight:900;letter-spacing:3px;padding:7px 16px;border-radius:8px;border:2.5px solid rgba(255,255,255,.3);}'
-    +'/* BODY */'
-    +'.body{padding:24px 28px;}'
-    +'/* INFO GRID */'
-    +'.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;margin-bottom:20px;}'
-    +'.info-cell{padding:12px 14px;border-right:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;}'
-    +'.info-cell:nth-child(2n){border-right:none;}'
-    +'.info-cell:nth-last-child(-n+2){border-bottom:none;}'
-    +'.info-cell.full{grid-column:1/-1;border-right:none;}'
-    +'.ic-lbl{font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#9ca3af;margin-bottom:3px;}'
-    +'.ic-val{font-size:13px;font-weight:700;color:#111827;}'
-    +'.ic-val.accent{color:#0d3b1e;}'
-    +'.ic-val.mono{font-family:"Courier New",monospace;font-size:13px;}'
-    +'/* SECTION DIVIDER */'
-    +'.sec-div{display:flex;align-items:center;gap:10px;margin:18px 0 14px;}'
-    +'.sec-div .line{flex:1;height:1px;background:#e5e7eb;}'
-    +'.sec-div .lbl{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#6b7280;white-space:nowrap;}'
-    +'/* PAYMENT ROW */'
-    +'.pay-row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#f9fafb;border-radius:10px;border:1px solid #f3f4f6;margin-bottom:8px;}'
-    +'.pr-k{font-size:12px;color:#6b7280;font-weight:500;}'
-    +'.pr-v{font-size:13px;font-weight:700;color:#111827;}'
-    +'/* TOTAL BAND */'
-    +'.total-band{background:linear-gradient(135deg,#0d3b1e,#1a6636);border-radius:12px;padding:16px 18px;display:flex;align-items:center;justify-content:space-between;margin-top:16px;}'
-    +'.tb-lbl{font-size:11px;color:rgba(255,255,255,.65);text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;}'
-    +'.tb-val{font-size:26px;font-weight:900;color:#fff;line-height:1;}'
-    +'.tb-val span{font-size:14px;font-weight:600;opacity:.7;margin-right:3px;}'
-    +'.tb-right{text-align:right;}'
-    +'.tb-status{background:#22c55e;color:#fff;font-size:9px;font-weight:800;letter-spacing:1.5px;padding:4px 10px;border-radius:50px;display:inline-block;margin-bottom:4px;}'
-    +'.tb-words{font-size:9px;color:rgba(255,255,255,.5);font-style:italic;margin-top:2px;max-width:140px;text-align:right;line-height:1.4;}'
-    +'/* INSTALMENT BOX */'
-    +'.inst-box{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:14px 16px;margin-bottom:16px;}'
-    +'.inst-box-h{font-size:10px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:#15803d;margin-bottom:10px;}'
-    +'.inst-bar{height:8px;background:#dcfce7;border-radius:50px;overflow:hidden;margin:10px 0;}'
-    +'.inst-bar-fill{height:100%;border-radius:50px;background:#16a34a;}'
-    +'/* FOOTER */'
-    +'.ftr{background:#f9fafb;border-top:1px solid #e5e7eb;padding:14px 28px;display:flex;align-items:center;justify-content:space-between;gap:12px;}'
-    +'.ftr-msg{font-size:10px;color:#9ca3af;}'
-    +'.ftr-msg strong{color:#6b7280;}'
-    +'.no-print-bar{background:#0d3b1e;border-radius:12px;padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;}'
-    +'.npb-txt h4{font-size:13px;font-weight:700;color:#fff;margin-bottom:2px;}'
-    +'.npb-txt p{font-size:10.5px;color:rgba(255,255,255,.55);}'
-    +'.prt-btn{padding:9px 20px;border:none;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;transition:opacity .15s;}'
-    +'.prt-btn:hover{opacity:.85;}'
-    +'@media print{body{background:#fff!important;padding:0!important;min-height:0!important;display:block!important;}.no-print-bar{display:none!important;}.card{border-radius:0!important;box-shadow:none!important;}}'
-    +'</style></head><body>'
-    +'<div class="wrap">'
-    +'<div class="no-print-bar"><div class="npb-txt"><h4>📄 Fee Receipt — '+f.student+'</h4><p>Receipt No. '+(f.receipt||'—')+' &nbsp;·&nbsp; Amount: Rs '+f.amt.toLocaleString()+'</p></div><div style="display:flex;gap:8px"><button class="prt-btn" style="background:#fff;color:#0d3b1e" onclick="window.print()">🖨️ Print</button></div></div>'
-    +'<div class="card">'
-    +'<!-- HEADER -->'
-    +'<div class="hdr" data-wm="'+instInitials+'">'
-    +'<div class="hdr-top"><div class="hdr-logo">'+logoBadge+'</div><div class="hdr-title"><h1>'+D.settings.instName+'</h1><p>Finance &amp; Accounts Department</p></div><div class="'+(f.status==='Paid'?'paid-badge':'hdr-badge')+'">'+(f.isInstalment?'Instalment Receipt':'Fee Receipt')+'</div></div>'
-    +'<div class="amt-hero"><div><div class="amt-main"><span>Rs</span>'+f.amt.toLocaleString()+'</div><div class="amt-lbl">'+amountInWords(f.amt)+'</div></div>'
-    +(f.status==='Paid'?'<div class="stamp-paid">✔ PAID</div>':'')
-    +'</div>'
-    +'</div>'
-    +'<!-- BODY -->'
-    +'<div class="body">'
-    +'<!-- STUDENT INFO GRID -->'
-    +'<div class="info-grid">'
-    +'<div class="info-cell"><div class="ic-lbl">Student Name</div><div class="ic-val accent">'+f.student+'</div></div>'
-    +'<div class="info-cell"><div class="ic-lbl">Roll Number</div><div class="ic-val mono">'+f.roll+'</div></div>'
-    +'<div class="info-cell"><div class="ic-lbl">Department</div><div class="ic-val">'+(stu.dept||'—')+'</div></div>'
-    +'<div class="info-cell"><div class="ic-lbl">Program / Class</div><div class="ic-val">'+(stu.cls||'—')+'</div></div>'
-    +'<div class="info-cell full"><div class="ic-lbl">Semester / Year</div><div class="ic-val">'+f.sem+'</div></div>'
-    +'</div>'
-    + instRows
-    +'<div class="sec-div"><div class="line"></div><div class="lbl">Payment Details</div><div class="line"></div></div>'
-    +'<div class="pay-row"><div class="pr-k">Receipt No.</div><div class="pr-v" style="font-family:\'Courier New\',monospace">'+(f.receipt||'—')+'</div></div>'
-    +(f.date&&f.date!=='-'?'<div class="pay-row"><div class="pr-k">Payment Date</div><div class="pr-v">'+f.date+'</div></div>':'')
-    +(f.method&&f.method!=='-'?'<div class="pay-row"><div class="pr-k">Payment Method</div><div class="pr-v">'+f.method+'</div></div>':'')
-    +(f.dueDate?'<div class="pay-row"><div class="pr-k">Due Date</div><div class="pr-v">'+f.dueDate+'</div></div>':'')
-    +'<div class="total-band"><div><div class="tb-lbl">Amount Paid</div><div class="tb-val"><span>Rs</span>'+f.amt.toLocaleString()+'</div></div><div class="tb-right"><div class="tb-status">✔ PAID</div><div class="tb-words">'+amountInWords(f.amt)+'</div></div></div>'
-    +'</div>'
-    +'<!-- FOOTER -->'
-    +'<div class="ftr"><div class="ftr-msg">Generated: <strong>'+new Date().toLocaleString()+'</strong></div><div class="ftr-msg">'+D.settings.instName+' · CampusTreasury</div></div>'
-    +'</div>'
-    +'</div>'
-    +'</body></html>';
+  function li(k,v){ return `<div class="line-item"><span>${k}</span><span>${v}</span></div>`; }
+  function td2(l1,v1,l2,v2){
+    return `<tr><td class="lb">${l1}</td><td class="vl">${v1}</td>`
+      +(l2!==undefined?`<td class="lb">${l2}</td><td class="vl">${v2}</td></tr>`:`<td class="vl" colspan="3"></td></tr>`);
+  }
+
+  const qrPayload=`RCPT:${f.receipt||''}|ROLL:${f.roll}|AMT:${f.amt}|DATE:${f.date||''}`;
+
+  const h=`<!DOCTYPE html><html><head><meta charset="UTF-8">
+  <title>Fee Receipt — ${f.student}</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:Arial,Helvetica,sans-serif;background:#ccc;padding:24px;color:#000;font-size:11px;}
+    .no-print-bar{max-width:420px;margin:0 auto 12px;background:#111;border-radius:8px;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;}
+    .npb-txt h4{font-size:12.5px;font-weight:700;color:#fff;}
+    .npb-txt p{font-size:10px;color:#bbb;margin-top:2px;}
+    .prt-btn{padding:7px 16px;border:none;border-radius:6px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:#111;}
+    .card{max-width:420px;margin:0 auto;background:#fff;padding:14px 16px 10px;}
+    /* HEADER */
+    .hdr{display:flex;align-items:flex-start;gap:8px;}
+    .hdr-logo{width:32px;height:32px;border-radius:50%;overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;border:1px solid #000;}
+    .hdr-center{flex:1;text-align:center;}
+    .hdr-center .cname{font-size:12.5px;font-weight:800;letter-spacing:.2px;}
+    .hdr-center .doctype{font-size:9px;font-weight:700;letter-spacing:.5px;margin-top:1px;}
+    .hdr-center .addr{font-size:8.5px;color:#333;margin-top:1px;}
+    .qr-slot{width:32px;height:32px;flex-shrink:0;}
+    .hr-dbl{border-top:1px solid #000;border-bottom:1px solid #000;height:3px;margin-top:6px;}
+    /* INFO TABLE */
+    .info-tbl{width:100%;border-collapse:collapse;margin-top:6px;font-size:10px;}
+    .info-tbl td{padding:2px 2px;vertical-align:top;}
+    .info-tbl .lb{color:#000;white-space:nowrap;padding-right:4px;}
+    .info-tbl .vl{font-weight:700;padding-right:10px;}
+    /* FEE DESC */
+    .fee-desc{margin-top:6px;padding:3px 0;border-top:1px solid #000;border-bottom:1px solid #000;font-size:10px;font-weight:700;}
+    .line-item{display:flex;justify-content:space-between;padding:3px 0;font-size:10px;}
+    .hr{border-top:1px solid #000;margin-top:2px;}
+    .spacer{height:46px;}
+    .spacer-sm{height:22px;}
+    .total-row{display:flex;justify-content:space-between;padding:2px 0;font-size:11px;font-weight:700;}
+    .total-row .tv{border-bottom:1.5px solid #000;padding-bottom:1px;min-width:70px;text-align:right;}
+    .words{font-size:8.5px;color:#333;font-style:italic;margin-top:3px;}
+    /* NOTES */
+    .notes{margin-top:8px;font-size:8px;color:#000;line-height:1.55;}
+    .notes strong{display:block;font-size:8.5px;margin-bottom:1px;}
+    .ftr{margin-top:6px;font-size:7.5px;color:#555;font-style:italic;}
+    @media print{
+      body{background:#fff!important;padding:0!important;}
+      .no-print-bar{display:none!important;}
+      .card{margin:0!important;max-width:none!important;}
+      @page{size:A4;margin:14mm;}
+    }
+  </style></head><body>
+  <div class="no-print-bar">
+    <div class="npb-txt"><h4>Fee Receipt — ${f.student}</h4><p>Receipt No. ${f.receipt||'—'} &nbsp;·&nbsp; Amount: Rs ${f.amt.toLocaleString()}</p></div>
+    <button class="prt-btn" onclick="window.print()">🖨️ Print</button>
+  </div>
+  <div class="card">
+    <div class="hdr">
+      <div class="hdr-logo">${hasRealLogo?logoBadge:getInstInitials()}</div>
+      <div class="hdr-center">
+        <div class="cname">${(D.settings.instName||'').toUpperCase()}</div>
+        <div class="doctype">FEE PAYMENT RECEIPT</div>
+        <div class="addr">${D.settings.address||D.settings.city||''}</div>
+      </div>
+      <div class="qr-slot" data-qr="${qrPayload}"></div>
+    </div>
+    <div class="hr-dbl"></div>
+
+    <table class="info-tbl">
+      ${td2('Receipt No.',f.receipt||'—','Dated',(f.date&&f.date!=='-')?f.date:'—')}
+      <tr><td class="lb">Student Name</td><td class="vl" colspan="3">${f.student}</td></tr>
+      ${td2("Father's Name",stu.father||'—','Roll No.',f.roll)}
+      <tr><td class="lb">Student Class</td><td class="vl" colspan="3">${(stu.cls||'—')}${stu.section?' ('+stu.section+')':''}</td></tr>
+      ${td2('Payment Method',(f.method&&f.method!=='-')?f.method:'—', f.isInstalment?'Instalment':'Semester', f.isInstalment?(f.instPart||'—'):(f.sem||'—'))}
+    </table>
+
+    <div class="fee-desc">${feeLabel} — ${D.settings.academicYear||''}</div>
+    ${li((f.category||'Tuition Fee'), 'Rs. '+f.amt.toLocaleString())}
+    ${instLines}
+    <div class="hr"></div>
+    <div class="spacer"></div>
+    <div class="total-row"><span>Fee Total:</span><span class="tv">${f.amt.toLocaleString()}</span></div>
+    <div class="words">${amountInWords(f.amt)}</div>
+    <div class="hr"></div>
+    <div class="spacer-sm"></div>
+
+    <div class="notes">
+      <strong>Note:</strong>
+      • This is a computer-generated receipt issued against the amount received above.<br>
+      • Please retain this receipt for your record — it is proof of payment.<br>
+      • Scan the QR code above to view the full fee voucher in digital form.<br>
+      • The fee once paid will not be refunded or transferred in any circumstances.
+    </div>
+    <div class="ftr">Printed from ${D.settings.instName} — Online Fee Management System</div>
+  </div>
+  <script>
+    (function renderQrSlots(attemptsLeft){
+      if (typeof QRCode === 'undefined') {
+        if (attemptsLeft > 0) return void setTimeout(function(){ renderQrSlots(attemptsLeft-1); }, 200);
+        return;
+      }
+      document.querySelectorAll('.qr-slot').forEach(function(el){
+        if (el.dataset.rendered) return;
+        el.dataset.rendered = '1';
+        new QRCode(el, { text: el.dataset.qr, width: 32, height: 32, colorDark: '#000000', colorLight: '#ffffff' });
+      });
+    })(25);
+  <\/script>
+  </body></html>`;
   showPrintPreview(h,(f.isInstalment?'Instalment Receipt':'Fee Receipt')+' - '+f.student);
 }
 
@@ -3896,11 +3904,14 @@ function printVoucher(idx){
   const expiryFmt    = fmtDate(expiryObj);
   const breakdown    = getFeeBreakdown(f.amt);
 
-  const qrData = encodeURIComponent(`VCH:${voucherNo}|ROLL:${stu.roll}|AMT:${f.amt}|DUE:${f.dueDate||''}`);
-  const qrUrl  = `https://api.qrserver.com/v1/create-qr-code/?data=${qrData}&size=80x80&margin=2&color=0d3b1e&bgcolor=ffffff`;
-  // Note: QR still encodes the base fee amount (f.amt) since late fee /
-  // fine amounts can change day-to-day (e.g. late fee grows daily) — the
-  // printed "TOTAL AMOUNT DUE" box below is the authoritative figure to pay.
+  const qrPayload = `VCH:${voucherNo}|ROLL:${stu.roll}|AMT:${f.amt}|DUE:${f.dueDate||''}`;
+  // QR is generated locally in-browser (via the QRCode library loaded in this
+  // document's <head>) instead of fetching an image from a third-party API —
+  // that external call has no offline fallback: if the school network is
+  // slow/restricted or that service is ever down, the QR silently fails to
+  // load. Generating it client-side means the voucher — including the
+  // downloaded standalone HTML copy — always shows a QR with no live network
+  // dependency at print time, and no student data is sent to an outside site.
 
   const isInstalment = !!(f.isInstalment && f.instTotal);
 
@@ -4018,7 +4029,7 @@ function printVoucher(idx){
           <div style="font-size:7.5px;color:rgba(255,255,255,.6);letter-spacing:1px;text-transform:uppercase;font-weight:600">Voucher No.</div>
           <div style="font-size:12px;font-weight:800;color:#fff;letter-spacing:.3px;margin-top:1px">${voucherNo}</div>
         </div>
-        <img src="${qrUrl}" alt="QR" style="width:52px;height:52px;background:#fff;padding:3px;border-radius:8px">
+        <div class="qr-slot" data-qr="${qrPayload}" style="width:52px;height:52px;background:#fff;padding:3px;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
         <div style="background:rgba(255,255,255,.9);color:${stripeClr};font-size:8px;font-weight:800;letter-spacing:1px;padding:3px 9px;text-transform:uppercase;border-radius:20px">${stampLabel}</div>
       </div>
     </div>
@@ -4243,7 +4254,7 @@ function printVoucher(idx){
       `<div class="cut-line"><span class="cut-scissors">✂</span> <span style="letter-spacing:1px;text-transform:uppercase;font-size:9.5px">cut here — ${c.type==='student'?'College Copy Below':'Bank Copy Below'}</span> <span class="cut-scissors">✂</span></div><div class="page-break"></div>` : '')
   ).join('');
 
-  const h = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fee Challan — ${stu.name} — ${voucherNo}</title><style>${css}</style></head><body>
+  const h = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fee Challan — ${stu.name} — ${voucherNo}</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><style>${css}</style></head><body>
   <div class="no-print">
     <div class="no-print-left">
       <h3>📄 Fee Demand Challan — ${stu.name}</h3>
@@ -4255,6 +4266,22 @@ function printVoucher(idx){
     </div>
   </div>
   ${allCopies}
+  <script>
+    // Render every QR placeholder locally once the QRCode library has loaded —
+    // retried briefly in case the script tag is still fetching, so QR codes
+    // still appear on slow connections instead of failing silently.
+    (function renderQrSlots(attemptsLeft){
+      if (typeof QRCode === 'undefined') {
+        if (attemptsLeft > 0) return void setTimeout(function(){ renderQrSlots(attemptsLeft-1); }, 200);
+        return;
+      }
+      document.querySelectorAll('.qr-slot').forEach(function(el){
+        if (el.dataset.rendered) return;
+        el.dataset.rendered = '1';
+        new QRCode(el, { text: el.dataset.qr, width: 52, height: 52, colorDark: '#0d3b1e', colorLight: '#ffffff' });
+      });
+    })(25);
+  </script>
   </body></html>`;
 
   showPrintPreview(h, 'Fee Challan — ' + stu.name);
@@ -4285,8 +4312,8 @@ function printTransportVoucher(idx){
   const voucherNo = 'TRV-' + String(2000+idx+1).padStart(5,'0');
   const academicYear = getAcademicYear();
 
-  const qrData = encodeURIComponent(`TRV:${voucherNo}|ROLL:${stu.roll}|AMT:${t.amt}|DUE:${t.dueDate||''}`);
-  const qrUrl  = `https://api.qrserver.com/v1/create-qr-code/?data=${qrData}&size=80x80&margin=2&color=0d3b1e&bgcolor=ffffff`;
+  const qrPayload = `TRV:${voucherNo}|ROLL:${stu.roll}|AMT:${t.amt}|DUE:${t.dueDate||''}`;
+  // Generated locally in-browser — see the note in printVoucher() above for why.
 
   const FONT = `-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Arial,sans-serif`;
   const ink='#0f172a', brand='#0e7490', brandDeep='#0a3d47'; // teal — visually distinct from the main green fee voucher
@@ -4318,7 +4345,7 @@ function printTransportVoucher(idx){
           <div style="font-size:7.5px;color:rgba(255,255,255,.6);letter-spacing:1px;text-transform:uppercase;font-weight:600">Voucher No.</div>
           <div style="font-size:12px;font-weight:800;color:#fff;margin-top:1px">${voucherNo}</div>
         </div>
-        <img src="${qrUrl}" alt="QR" style="width:52px;height:52px;background:#fff;padding:3px;border-radius:8px">
+        <div class="qr-slot" data-qr="${qrPayload}" style="width:52px;height:52px;background:#fff;padding:3px;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
         <div style="background:rgba(255,255,255,.9);color:${stripeClr};font-size:8px;font-weight:800;letter-spacing:1px;padding:3px 9px;text-transform:uppercase;border-radius:20px">${stampLabel}</div>
       </div>
     </div>
@@ -4398,7 +4425,7 @@ function printTransportVoucher(idx){
     @media print{ body{background:#fff;padding:0;} .no-print{display:none!important;} .page-break{page-break-after:always;} }`;
 
   const docLabel = t.status==='Paid' ? 'Transport Fee Receipt' : 'Transport Fee Voucher';
-  const h = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${docLabel} — ${stu.name} — ${voucherNo}</title><style>${css}</style></head><body>
+  const h = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${docLabel} — ${stu.name} — ${voucherNo}</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><style>${css}</style></head><body>
   <div class="no-print">
     <div class="no-print-left">
       <h3>🚌 ${docLabel} — ${stu.name}</h3>
@@ -4416,6 +4443,19 @@ function printTransportVoucher(idx){
   <div class="cut-line"><span>✂ cut here — Office Copy Below ✂</span></div>
   <div class="page-break"></div>
   ${genTfCopy('office')}`}
+  <script>
+    (function renderQrSlots(attemptsLeft){
+      if (typeof QRCode === 'undefined') {
+        if (attemptsLeft > 0) return void setTimeout(function(){ renderQrSlots(attemptsLeft-1); }, 200);
+        return;
+      }
+      document.querySelectorAll('.qr-slot').forEach(function(el){
+        if (el.dataset.rendered) return;
+        el.dataset.rendered = '1';
+        new QRCode(el, { text: el.dataset.qr, width: 52, height: 52, colorDark: '#0d3b1e', colorLight: '#ffffff' });
+      });
+    })(25);
+  </script>
   </body></html>`;
 
   showPrintPreview(h, (t.status==='Paid'?'Transport Fee Receipt — ':'Transport Fee Voucher — ') + stu.name);
