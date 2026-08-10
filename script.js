@@ -8426,4 +8426,4 @@ function renderPendingSalAlert(){
         </div>
       </div>
     </div>`;
-}\
+}
