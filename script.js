@@ -79,6 +79,11 @@ const D = {
     {fineId:'FIN-1',student:'Kamran Ali', roll:'B-FSE-2024-01', reason:'Uniform Violation', amt:500, date:'12 Jan 2025', status:'Pending'},
     {fineId:'FIN-2',student:'Nadia Khalid', roll:'G-FA-2024-01', reason:'Late Attendance', amt:300, date:'8 Jan 2025', status:'Paid'},
   ],
+  // ── Payment History — one row per actual payment transaction ──
+  // Separate from D.fees (which holds the running amt/paidAmt balance per
+  // instalment) so that multiple partial payments against the same
+  // instalment are never overwritten, only appended to.
+  feePayments:[],
   tx:[],
   manualTx:[],
   seq:{fee:0,sal:0,exp:0,fine:2,tf:0,tftx:0},
@@ -115,7 +120,26 @@ const D = {
     address:'Main Campus, Lahore, Pakistan',
     lateFeePct:5,
     feeDueDay:25,
-    sessionTimeoutMin:15
+    sessionTimeoutMin:15,
+    // ── Bank / payment details shown on every voucher — configurable here
+    // instead of hard-coded in the voucher template (spec section 9).
+    bankName:'MCB Bank Ltd',
+    bankBranch:'Johar Town',
+    bankAccountTitle:'Superior College',
+    bankAccountNo:'0123456789',
+    bankIBAN:'PK00MCB0000000123456789',
+    customerCode:'SC',
+    voucherPrefix:'FEE',
+    // ── Default voucher instructions — configurable, not permanently
+    // hard-coded (spec section 12). Edit this array from Settings.
+    voucherInstructions:[
+      'Fee must be deposited on or before the due date.',
+      'Only the amount specified on the fee voucher is acceptable.',
+      'Fee once paid is non-refundable and non-transferable, subject to institution policy.',
+      'Students must retain the paid voucher/receipt for their records.',
+      'For fee-related queries, contact the Accounts/Finance Office.',
+      'Late payment may be subject to applicable late fees or institution policy.'
+    ]
   },
   years:['2024-25','2025-26']
 };
@@ -177,8 +201,8 @@ const netPay = s => Math.max(0, (Number(s.basic)||0) + (Number(s.allow)||0) - (N
 const todayStr = () => new Date().toLocaleDateString('en-PK',{day:'numeric',month:'short',year:'numeric'});
 const isoDate = () => new Date().toISOString().slice(0,10);
 const avC = i => ['av0','av1','av2','av3'][i%4];
-const bdgCls = {Paid:'badge bg-g',Pending:'badge bg-y',Overdue:'badge bg-r',Active:'badge bg-g',Approved:'badge bg-g',Income:'badge bg-g',Expense:'badge bg-r','On Leave':'badge bg-y',Inactive:'badge bg-r'};
-const bdg = s => `<span class="${bdgCls[s]||'badge bg-y'}">${s}</span>`;
+const bdgCls = {Paid:'badge bg-g',Pending:'badge bg-y',Overdue:'badge bg-r',Active:'badge bg-g',Approved:'badge bg-g',Income:'badge bg-g',Expense:'badge bg-r','On Leave':'badge bg-y',Inactive:'badge bg-r',Partial:'badge bg-y','Partial-Overdue':'badge bg-r'};
+const bdg = s => `<span class="${bdgCls[s]||'badge bg-y'}">${s==='Partial'?'PARTIALLY PAID':s==='Partial-Overdue'?'PARTIAL (OVERDUE)':s}</span>`;
 const bs = 'padding:4px 9px;font-size:11px;border-radius:6px;cursor:pointer;font-family:inherit;border:none;margin-right:3px;';
 const C = {g:'#20954a',g2:'#45d47a',o:'#f59e0b',r:'#ef4444',b:'#3b82f6',gr:'#e4ebe6'};
 const charts = {};
@@ -1904,10 +1928,15 @@ function rStudents(){
   // Stats
   const boysCount=D.students.filter(s=>s.gender==='Male').length;
   const girlsCount=D.students.filter(s=>s.gender==='Female').length;
-  // Fee stats from D.fees (+ Transport Fee, which is real income too)
-  const paidAmt=D.fees.filter(f=>f.status==='Paid').reduce((a,b)=>a+b.amt,0)+D.transportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
-  const pendingAmt=D.fees.filter(f=>f.status==='Pending').reduce((a,b)=>a+b.amt,0)+D.transportFees.filter(t=>t.status==='Pending').reduce((a,b)=>a+b.amt,0);
-  const overdueAmt=D.fees.filter(f=>f.status==='Overdue').reduce((a,b)=>a+b.amt,0)+D.transportFees.filter(t=>t.status==='Overdue').reduce((a,b)=>a+b.amt,0);
+  // Fee stats from D.fees (+ Transport Fee, which is real income too).
+  // Uses feePaidAmt/feeRemainingAmt so a partially-paid instalment counts
+  // its paid portion as collected and only the true remaining balance as
+  // outstanding — a plain status==='Paid' filter would miss partial cash
+  // already received, and status==='Overdue' alone would double-count the
+  // paid portion of a partially-paid-but-overdue instalment as still owed.
+  const paidAmt=D.fees.reduce((a,b)=>a+feePaidAmt(b),0)+D.transportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
+  const pendingAmt=D.fees.filter(f=>f.status==='Pending'||f.status==='Partial').reduce((a,b)=>a+feeRemainingAmt(b),0)+D.transportFees.filter(t=>t.status==='Pending').reduce((a,b)=>a+b.amt,0);
+  const overdueAmt=D.fees.filter(f=>f.status==='Overdue'||f.status==='Partial-Overdue').reduce((a,b)=>a+feeRemainingAmt(b),0)+D.transportFees.filter(t=>t.status==='Overdue').reduce((a,b)=>a+b.amt,0);
   const unpaidAmt=pendingAmt+overdueAmt;
   const overdueCount=D.students.filter(s=>s.status==='Overdue').length;
   const pendingCount=D.students.filter(s=>s.status==='Pending').length;
@@ -2548,6 +2577,11 @@ function printEmp(){
 let FF={q:'',st:'',mt:'',gn:'',cls:'',sec:''};
 let feeRC=1010;
 let voucherRC=5001; // Persistent voucher counter — increments each time a voucher is printed
+let instVoucherRC=1; // Persistent counter for the instalment voucher scheme (FEE-YYYY-000001), any N — never reused
+function nextInstVoucherNo(){
+  const yr=new Date().getFullYear();
+  return `${D.settings.voucherPrefix||'FEE'}-${yr}-${String(instVoucherRC++).padStart(6,'0')}`;
+}
 
 function rFees(){
   // Populate fee filter dropdowns
@@ -2561,9 +2595,9 @@ function rFees(){
       &&(!FF.cls||!stu||stu.cls===FF.cls)
       &&(!FF.sec||!stu||stu.section===FF.sec);
   });
-  const paid=D.fees.filter(f=>f.status==='Paid').reduce((a,b)=>a+b.amt,0);
-  const pend=D.fees.filter(f=>f.status==='Pending').reduce((a,b)=>a+b.amt,0);
-  const over=D.fees.filter(f=>f.status==='Overdue').reduce((a,b)=>a+b.amt,0);
+  const paid=D.fees.reduce((a,b)=>a+feePaidAmt(b),0);
+  const pend=D.fees.filter(f=>f.status==='Pending'||f.status==='Partial').reduce((a,b)=>a+feeRemainingAmt(b),0);
+  const over=D.fees.filter(f=>f.status==='Overdue'||f.status==='Partial-Overdue').reduce((a,b)=>a+feeRemainingAmt(b),0);
   const tot=paid+pend+over;
   $('f-c').textContent=fmt(paid);$('f-p').textContent=fmt(pend);$('f-o').textContent=fmt(over);
   $('f-r').textContent=(tot>0?Math.round((paid/tot)*100):0)+'%';
@@ -2573,10 +2607,11 @@ function rFees(){
     const gnBadge=fStu?(fStu.gender==='Male'?'<span style="font-size:9px;background:#dbeafe;color:#1d4ed8;padding:2px 7px;border-radius:50px;font-weight:700">Boy</span>':'<span style="font-size:9px;background:#ede9fe;color:#5b21b6;padding:2px 7px;border-radius:50px;font-weight:700">Girl</span>'):'—';
     // Instalment progress badge
     let instBadge='';
+    let totalInst=0;
     if(f.isInstalment){
       const allInst=D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal);
-      const paidInst=allInst.filter(x=>x.status==='Paid').length;
-      const totalInst=allInst.length||parseInt((f.instPart||'1/1').split('/')[1])||1;
+      const paidInst=allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
+      totalInst=allInst.length||parseInt((f.instPart||'1/1').split('/')[1])||1;
       const progColor=paidInst===totalInst?'var(--g5)':paidInst>0?'var(--yl)':'#92400e';
       instBadge=`<span style="font-size:9px;background:#fef3cd;color:${progColor};padding:2px 7px;border-radius:50px;font-weight:700;margin-left:4px">📆 Inst ${f.instPart||''} · ${paidInst}/${totalInst} paid</span>`;
     }
@@ -2616,6 +2651,12 @@ function rFees(){
               :`<button onclick="quickCollect(${idx});closeAllMenus()">💳 Collect Payment</button>
                 <button onclick="printVoucher(${idx});closeAllMenus()">🖨️ Print Fee Voucher</button>`
             }
+            ${f.isInstalment?`
+                <hr>
+                <button onclick="printInstalmentVouchers('${f.roll}',${f.instTotal},'all');closeAllMenus()">📄 Generate All ${totalInst} Vouchers</button>
+                <button onclick="printInstalmentVouchers('${f.roll}',${f.instTotal},'paid');closeAllMenus()">✅ Generate Paid Vouchers</button>
+                <button onclick="printInstalmentVouchers('${f.roll}',${f.instTotal},'remaining');closeAllMenus()">⏳ Generate Remaining Vouchers</button>
+            `:''}
             ${f.status==='Overdue'&&!f.lateFeeApplied
               ?`<button onclick="applyLateFee(${idx});closeAllMenus()">⚠️ Apply Late Fee</button>`
               :''}
@@ -3286,9 +3327,9 @@ function viewFee(idx){
   let instHtml='';
   if(f.isInstalment&&f.instTotal){
     const allInst=D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal);
-    const paidCount=allInst.filter(x=>x.status==='Paid').length;
+    const paidCount=allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
     const totalCount=allInst.length;
-    const paidAmt=allInst.filter(x=>x.status==='Paid').reduce((a,b)=>a+b.amt,0);
+    const paidAmt=allInst.reduce((a,b)=>a+feePaidAmt(b),0);
     const pct=Math.round((paidAmt/f.instTotal)*100);
     instHtml=`<div style="background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:12px 14px;margin-top:12px"><div style="font-size:10px;font-weight:700;color:var(--g7);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">📆 Instalment Plan</div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>This Instalment</span><strong>${f.instPart||''}</strong></div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>Paid</span><strong style="color:var(--g7)">${paidCount} of ${totalCount}</strong></div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>Total Fee</span><span>Rs ${f.instTotal.toLocaleString()}</span></div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span>Paid So Far</span><strong style="color:var(--g7)">Rs ${paidAmt.toLocaleString()}</strong></div><div style="background:var(--s2);height:6px;border-radius:50px;margin-top:8px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--g5);border-radius:50px"></div></div></div>`;
   }
@@ -3309,6 +3350,58 @@ function saveFee(){
   const stuName=($('fn')||{}).value||'';
   const fa=$('fa').value.trim();
   if(!stuName||!stuRoll||!fa){toast('Student and Amount are required');return;}
+
+  // ── INSTALMENT RECORD: partial-payment path ──────────────────────────
+  // Status here is always DERIVED from paidAmt vs amt (never chosen from a
+  // dropdown), and every payment is appended to D.feePayments rather than
+  // silently overwriting the previous one.
+  if(isEdit && D.fees[editIdx] && D.fees[editIdx].isInstalment){
+    const f=D.fees[editIdx];
+    const already=feePaidAmt(f);
+    let payNow=parseInt(($('fPayNow')||{}).value)||0;
+    payNow=Math.max(0,Math.min(payNow, f.amt-already)); // never allow paid > payable
+    if(payNow<=0){toast('Enter an amount greater than 0 to record a payment');return;}
+    feeRC++;
+    const newPaidAmt=already+payNow;
+    const newStatus=feeComputeStatus({...f,paidAmt:newPaidAmt});
+    const receipt=($('frc').value.trim()||'REC-'+feeRC);
+    const method=$('fpm').value;
+    const payDate=todayStr();
+
+    f.paidAmt=newPaidAmt;
+    f.status=newStatus;
+    f.date=payDate;         // date of most recent payment
+    f.method=method;
+    f.receipt=receipt;
+    f.dueDate=$('fdd').value||f.dueDate;
+
+    D.feePayments.push({
+      paymentId:'PMT-'+feeRC, roll:stuRoll, student:stuName,
+      instPart:f.instPart, instTotal:f.instTotal, voucherRef:f.receipt,
+      amount:payNow, date:payDate, method, reference:receipt,
+      receivedBy:(D.currentUser&&D.currentUser.name)||'System', status:'Success'
+    });
+
+    auditLog('action',`Instalment payment recorded: ${stuName} — Rs ${payNow.toLocaleString()} (Inst ${f.instPart}) — new status ${feeStatusLabel(newStatus)}`);
+
+    // Update overall student status from the full 4-part plan, not just this row
+    const stu=D.students.find(s=>s.roll===stuRoll);
+    if(stu){
+      const planRows=instPlanRows(f);
+      const allPaid=planRows.every(r=>feeComputeStatus(r)==='Paid');
+      const anyOverdue=planRows.some(r=>feeComputeStatus(r).includes('Overdue'));
+      stu.status=allPaid?'Paid':anyOverdue?'Overdue':'Pending';
+    }
+
+    buildTx();rFees();rFines();rTx();rDash();rStudents();
+    closeMo('addFee');
+    _feeSelectedStu=null;
+    toast(`✅ Payment recorded — Rs ${payNow.toLocaleString()} · Instalment now ${feeStatusLabel(newStatus)}`);
+    setTimeout(()=>{ printReceipt(editIdx, payNow); }, 600);
+    return;
+  }
+
+  // ── NON-INSTALMENT (full payment) RECORD: existing behavior, unchanged ──
   feeRC++;
   const status=$('fst').value;
   const isPaid=status==='Paid';
@@ -3330,7 +3423,7 @@ function saveFee(){
   const f={
     student:stuName, roll:stuRoll,
     sem:$('fsm').value,
-    amt:amtVal,
+    amt:amtVal, paidAmt:isPaid?amtVal:0,
     date:isPaid?todayStr():'-',
     method:isPaid?$('fpm').value:'-',
     receipt:isPaid?($('frc').value.trim()||'REC-'+feeRC):'-',
@@ -3338,14 +3431,6 @@ function saveFee(){
     dueDate:$('fdd').value||'',
     category:'Tuition'
   };
-  // Preserve instalment fields if editing an instalment record
-  if(isEdit&&D.fees[editIdx]&&D.fees[editIdx].isInstalment){
-    f.isInstalment=true;
-    f.instPart=D.fees[editIdx].instPart;
-    f.instMonth=D.fees[editIdx].instMonth;
-    f.instTotal=D.fees[editIdx].instTotal;
-    f.instInterval=D.fees[editIdx].instInterval;
-  }
   // Preserve the disciplinary-fine link if editing/collecting a Fine-category record
   if(isEdit&&D.fees[editIdx]&&D.fees[editIdx].linkedFineId){
     f.category='Fine';
@@ -3419,45 +3504,51 @@ function saveFeeInstalments(){
   const stuRoll=($('fr')||{}).value||'';
   const fa=parseInt($('fa').value)||0;
   const sem=$('fsm').value;
-  const count=parseInt($('fInstCount').value)||2;
   if(!stuName||!stuRoll||!fa){toast('Student and Amount are required');return;}
-  const firstDueDateStr=$('fdd').value||new Date().toISOString().slice(0,10);
-  const firstDue=new Date(firstDueDateStr);
-  const cls=_feeSelectedStu?(_feeSelectedStu.cls||''):'';
-  const interval=getInstInterval(cls,count);
+
+  // Read the N admin-entered amounts + due dates and validate before saving
+  // anything — the system must NEVER accept installments whose sum doesn't
+  // match the total fee (see the live validator wired to these same inputs
+  // in feeInstRowInput / feeValidateInstSum). N comes from feeGetInstCount()
+  // (the #fInstCount select — 2/3/4/6…), not a hard-coded 4, so whichever
+  // count the admin picked is exactly what gets rendered and saved.
+  const count=feeGetInstCount();
+  const amounts=Array.from({length:count},(_,i)=>parseInt(($('fInstAmt'+i)||{}).value)||0);
+  const dueDates=Array.from({length:count},(_,i)=>($('fInstDate'+i)||{}).value||'');
+  const sum=amounts.reduce((a,b)=>a+b,0);
+  if(amounts.some(a=>a<=0)){toast(`❌ Each of the ${count} instalments must have an amount greater than 0`);return;}
+  if(dueDates.some(d=>!d)){toast(`❌ Each of the ${count} instalments needs a due date`);return;}
+  if(sum!==fa){toast(`❌ Instalments (Rs ${sum.toLocaleString()}) must add up to the Total Fee (Rs ${fa.toLocaleString()})`);return;}
+
   const today=new Date(); today.setHours(0,0,0,0);
   const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const perAmt=Math.floor(fa/count);
-  let remainder=fa-(perAmt*count);
   for(let i=0;i<count;i++){
     feeRC++;
-    const instAmt=i===count-1?perAmt+remainder:perAmt;
-    const dueDate=new Date(firstDue.getFullYear(),firstDue.getMonth()+(i*interval),firstDue.getDate());
-    const dueDateStr=dueDate.toISOString().slice(0,10);
-    const monthLabel=months[dueDate.getMonth()]+' '+dueDate.getFullYear();
+    const dueDate=new Date(dueDates[i]);
     const isOverdue=dueDate<today;
+    const monthLabel=months[dueDate.getMonth()]+' '+dueDate.getFullYear();
     D.fees.push({
       student:stuName, roll:stuRoll, sem:sem,
-      amt:instAmt,
+      amt:amounts[i], paidAmt:0,
       date:'-', method:'-',
       receipt:'INST-'+feeRC,
       status:isOverdue?'Overdue':'Pending',
-      dueDate:dueDateStr,
+      dueDate:dueDates[i],
       isInstalment:true,
+      instIdx:i,
       instPart:(i+1)+'/'+count,
       instMonth:monthLabel,
       instTotal:fa,
-      instInterval:interval,
       category:'Tuition'
     });
   }
   // Update student status
   const stu=D.students.find(s=>s.roll===stuRoll);
   if(stu&&stu.status!=='Paid') stu.status=D.fees.some(f=>f.roll===stuRoll&&f.status==='Overdue')?'Overdue':'Pending';
-  auditLog('action','Instalment plan created: '+stuName+' Rs '+fa+' in '+count+' parts (every '+interval+' months)');
+  auditLog('action',count+'-part fee structure created: '+stuName+' — Total Rs '+fa+' ('+amounts.map(a=>'Rs '+a.toLocaleString()).join(' + ')+')');
   buildTx();rFees();rTx();rDash();rStudents();
   closeMo('addFee');
-  toast('✅ '+count+' instalments created! Every '+interval+' month(s) from '+firstDueDateStr);
+  toast(`✅ Fee structure saved — ${count} instalments created!`);
   _feeSelectedStu=null;
 }
 
@@ -3478,7 +3569,6 @@ function openAddFee(){
   $('fa').value='25000';
   $('frc').value='';
   $('fInstCheck').checked=false;
-  $('fInstCount').value='2';
   feeToggleInstalment(false);
   feeStep(1);
   showMo('addFee');
@@ -3495,17 +3585,57 @@ function openEditFee(idx){
   feeShowSelected(_feeSelectedStu);
   $('fa').value=f.amt;
   $('fsm').value=f.sem;
-  $('fst').value=f.status;
-  feeStatusChange(f.status);
   $('fpm').value=f.method!=='-'?f.method:'Cash';
   $('frc').value=f.receipt!=='-'?f.receipt:'';
   $('fdd').value=f.dueDate||'';
   $('fInstCheck').checked=false;
   feeToggleInstalment(false);
+
+  if(f.isInstalment){
+    // Instalments use partial-payment entry — status is DERIVED from the
+    // amount paid, never chosen manually, so it can't drift out of sync.
+    $('fStatusWrap').style.display='none';
+    $('fPartialPayWrap').style.display='block';
+    const already=feePaidAmt(f);
+    $('fPay-already').textContent='Rs '+already.toLocaleString();
+    $('fPay-owed').textContent='Rs '+f.amt.toLocaleString();
+    $('fPayNow').value=feeRemainingAmt(f);
+    $('fPayNow').max=feeRemainingAmt(f);
+    feePreviewPartial();
+    $('fst').value=feeComputeStatus(f)==='Paid'?'Paid':'Pending'; // kept in sync for saveFee's isEdit branch, but not shown
+  }else{
+    $('fStatusWrap').style.display='block';
+    $('fPartialPayWrap').style.display='none';
+    $('fst').value=f.status;
+    feeStatusChange(f.status);
+  }
   // If this is an instalment fee, show the full plan overview below step indicator
   feeShowInstPlan(f.roll, f.instTotal||null);
   feeStep(2);
   showMo('addFee');
+}
+
+// Live preview shown while entering a partial payment against an instalment
+// — recalculates new cumulative paid amount, resulting status, and
+// remaining balance on every keystroke, and caps entry at what's still owed
+// (never allow Paid Amount > Payable Amount).
+function feePreviewPartial(){
+  const idx=parseInt($('feeEditIdx').value);
+  const f=D.fees[idx];
+  if(!f)return;
+  const already=feePaidAmt(f);
+  const owed=f.amt;
+  let payNow=parseInt($('fPayNow').value)||0;
+  const maxAllowed=owed-already;
+  if(payNow>maxAllowed){ payNow=maxAllowed; $('fPayNow').value=maxAllowed; }
+  if(payNow<0){ payNow=0; $('fPayNow').value=0; }
+  const newPaid=already+payNow;
+  const newStatus=newPaid>=owed?'Paid':newPaid>0?'Partial':'Pending';
+  const box=$('fPay-preview');
+  if(box){
+    box.style.color=newStatus==='Paid'?'#065f46':newStatus==='Partial'?'#92400e':'#6b7280';
+    box.textContent=`→ New status: ${feeStatusLabel(newStatus)} · Paid so far: Rs ${newPaid.toLocaleString()} · Remaining: Rs ${(owed-newPaid).toLocaleString()}`;
+  }
 }
 
 function feeShowInstPlan(roll, instTotal){
@@ -3515,9 +3645,9 @@ function feeShowInstPlan(roll, instTotal){
   const today=new Date(); today.setHours(0,0,0,0);
   const allInst=D.fees.filter(f=>f.roll===roll&&f.isInstalment&&f.instTotal===instTotal);
   if(!allInst.length){planDiv.style.display='none';return;}
-  const paidCount=allInst.filter(f=>f.status==='Paid').length;
+  const paidCount=allInst.filter(f=>feeComputeStatus(f)==='Paid').length;
   const totalCount=allInst.length;
-  const paidAmt=allInst.filter(f=>f.status==='Paid').reduce((a,b)=>a+b.amt,0);
+  const paidAmt=allInst.reduce((a,b)=>a+feePaidAmt(b),0);
   const totalAmt=allInst.reduce((a,b)=>a+b.amt,0);
   const pct=Math.round((paidAmt/totalAmt)*100);
   let html=`<div style="margin-bottom:14px;background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:12px 14px">
@@ -3530,18 +3660,20 @@ function feeShowInstPlan(roll, instTotal){
     </div>
     <div style="display:flex;flex-direction:column;gap:5px">`;
   allInst.forEach((f,i)=>{
+    const status=feeComputeStatus(f);
+    const isPaidRow=status==='Paid';
+    const isOvr=status.includes('Overdue');
     const due=f.dueDate?new Date(f.dueDate):null;
     if(due) due.setHours(0,0,0,0);
-    const isOvr=due&&due<today&&f.status!=='Paid';
     const diffDays=due?Math.ceil((due-today)/(1000*60*60*24)):null;
-    const fidx=D.fees.indexOf(f);
-    html+=`<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;background:${f.status==='Paid'?'#f0fdf4':isOvr?'#fff1f1':'#fff'};border:1px solid ${f.status==='Paid'?'var(--g1)':isOvr?'#fca5a5':'var(--s2)'}">
-      <div style="width:22px;height:22px;border-radius:50%;background:${f.status==='Paid'?'var(--g5)':isOvr?'var(--rd)':'var(--s3)'};color:#fff;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</div>
+    const rowPaid=feePaidAmt(f);
+    html+=`<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;background:${isPaidRow?'#f0fdf4':isOvr?'#fff1f1':status.startsWith('Partial')?'#fffbeb':'#fff'};border:1px solid ${isPaidRow?'var(--g1)':isOvr?'#fca5a5':'var(--s2)'}">
+      <div style="width:22px;height:22px;border-radius:50%;background:${isPaidRow?'var(--g5)':isOvr?'var(--rd)':'var(--s3)'};color:#fff;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</div>
       <div style="flex:1;font-size:11px">
-        <span style="font-weight:700;color:${f.status==='Paid'?'var(--g6)':isOvr?'var(--rd)':'var(--s6)'}">${f.status==='Paid'?'✅ Paid':isOvr?'⚠️ Overdue':'⏳ Pending'}</span>
-        <span style="color:var(--s4);margin-left:6px">${f.dueDate||''} ${isOvr&&diffDays!==null?'('+Math.abs(diffDays)+' days overdue)':(!isOvr&&diffDays!==null&&f.status!=='Paid'?'('+diffDays+' days left)':'')}</span>
+        <span style="font-weight:700;color:${isPaidRow?'var(--g6)':isOvr?'var(--rd)':'var(--s6)'}">${feeStatusLabel(status)}</span>
+        <span style="color:var(--s4);margin-left:6px">${f.dueDate||''} ${isOvr&&diffDays!==null?'('+Math.abs(diffDays)+' days overdue)':(!isOvr&&diffDays!==null&&!isPaidRow?'('+diffDays+' days left)':'')}</span>
       </div>
-      <span style="font-size:12px;font-weight:800;color:var(--s6)">Rs ${fmt(f.amt)}</span>
+      <span style="font-size:12px;font-weight:800;color:var(--s6)">Rs ${fmt(rowPaid)} / Rs ${fmt(f.amt)}</span>
     </div>`;
   });
   html+='</div></div>';
@@ -3612,19 +3744,6 @@ function feeSelectStu(roll){
   $('fstu-search').value='';
   $('fstep1-next').disabled=false;
   $('fstep1-next').style.opacity='1';
-  // Show instalment count options based on level
-  const instCountEl=$('fInstCount');
-  if(instCountEl){
-    const isInter=(s.cls||'').startsWith('Inter-');
-    instCountEl.innerHTML=isInter
-      ?`<option value="2">2 Instalments (every 6 months)</option>
-         <option value="3">3 Instalments (every 4 months)</option>
-         <option value="4" selected>4 Instalments (every 3 months — Quarterly)</option>
-         <option value="12">12 Instalments (every month)</option>`
-      :`<option value="2">2 Instalments (every 3 months)</option>
-         <option value="3" selected>3 Instalments (every 2 months)</option>
-         <option value="6">6 Instalments (every month)</option>`;
-  }
 }
 
 function feeShowSelected(s){
@@ -3659,155 +3778,242 @@ function feeUpdateInstalment(){
   feeGenInstalments();
 }
 
-function feeGenInstalments(){
-  const fa=parseInt($('fa').value)||0;
-  const count=parseInt($('fInstCount').value)||2;
-  const perAmt=Math.floor(fa/count);
-  const remainder=fa-(perAmt*count);
-  $('fInst-total').textContent='Rs '+fmt(fa);
-  $('fInst-per').textContent='Rs '+fmt(perAmt)+(remainder?' (+Rs '+remainder+' last)':'');
-  const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const today=new Date(); today.setHours(0,0,0,0);
-  // Use first due date from fdd field; default to today
-  const firstDueDateStr=$('fdd').value||new Date().toISOString().slice(0,10);
-  const firstDue=new Date(firstDueDateStr);
-  // Level-aware interval
-  const cls=_feeSelectedStu?((_feeSelectedStu.cls||'')):'';
-  const interval=getInstInterval(cls,count);
-  $('fInstRows').innerHTML=Array.from({length:count},(_,i)=>{
-    const instAmt=i===count-1?perAmt+remainder:perAmt;
-    const dueDate=new Date(firstDue.getFullYear(),firstDue.getMonth()+(i*interval),firstDue.getDate());
-    const dueDateStr=dueDate.toISOString().slice(0,10);
-    const monthLabel=months[dueDate.getMonth()]+' '+dueDate.getFullYear();
-    const isOverdue=dueDate<today;
-    const diffDays=Math.ceil((dueDate-today)/(1000*60*60*24));
-    return`<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:${isOverdue?'#fff1f1':'var(--s0)'};border:1px solid ${isOverdue?'#fca5a5':'var(--s2)'};border-radius:var(--rads)">
-      <div style="width:28px;height:28px;border-radius:50%;background:${isOverdue?'var(--rd)':'var(--g5)'};color:#fff;font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</div>
-      <div style="flex:1">
-        <div style="font-size:12px;font-weight:700;color:${isOverdue?'var(--rd)':'var(--s6)'}">Instalment ${i+1} of ${count} ${isOverdue?'· ⚠️ OVERDUE':''}</div>
-        <div style="font-size:11px;color:var(--s4)">Due: ${dueDateStr} (${monthLabel}) ${isOverdue?'— '+Math.abs(diffDays)+' days overdue':diffDays<=7?'— '+diffDays+' days left':''}</div>
-      </div>
-      <div style="font-size:14px;font-weight:800;color:${isOverdue?'var(--rd)':'var(--g6)'}">Rs ${fmt(instAmt)}</div>
-    </div>`;
-  }).join('');
+// Reads the admin-chosen instalment count from the #fInstCount select
+// (2 / 3 / 4 / 6 …) — every function below reads the SAME count from here
+// instead of hard-coding 4, so switching the dropdown actually changes how
+// many rows are generated, validated, and saved.
+function feeGetInstCount(){
+  return parseInt((($('fInstCount')||{}).value))||4;
 }
 
-function printReceipt(idx){
-  const f=D.fees[idx];
-  if(!f){toast('Receipt not found');return;}
-  const stu=D.students.find(s=>s.roll===f.roll)||{};
-  const logoBadge=getLogoBadgeInner();
-  const hasRealLogo=!!D.settings.logoDataUrl;
+// Renders N EDITABLE installment rows (amount + due date), each admin-defined
+// — NOT hard-coded to an equal split, and N comes from feeGetInstCount() so
+// 2/3/4/6 all work. feeValidateInstSum() re-checks the sum on every keystroke
+// and disables Save until the N amounts add up exactly to the Total Fee
+// entered in Step 2.
+function feeGenInstalments(){
+  const fa=parseInt($('fa').value)||0;
+  const count=feeGetInstCount();
+  const firstDueDateStr=$('fdd').value||new Date().toISOString().slice(0,10);
+  const firstDue=new Date(firstDueDateStr);
+  const cls=_feeSelectedStu?((_feeSelectedStu.cls||'')):'';
+  const interval=getInstInterval(cls,count);
+  $('fInst-total').textContent='Rs '+fmt(fa);
+  const suggestedPer=Math.floor(fa/count);
+  const suggestedRem=fa-(suggestedPer*count);
+  $('fInst-per').textContent='Suggested: Rs '+fmt(suggestedPer)+' × '+count+' (adjust freely below)';
+  $('fInstRows').innerHTML=Array.from({length:count},(_,i)=>{
+    const dueDate=new Date(firstDue.getFullYear(),firstDue.getMonth()+(i*interval),firstDue.getDate());
+    const dueDateStr=dueDate.toISOString().slice(0,10);
+    const suggestedAmt=i===count-1?suggestedPer+suggestedRem:suggestedPer;
+    return`<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--s0);border:1px solid var(--s2);border-radius:var(--rads)">
+      <div style="width:28px;height:28px;border-radius:50%;background:var(--g5);color:#fff;font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</div>
+      <div style="flex:1">
+        <div style="font-size:10.5px;color:var(--s4);margin-bottom:3px">Instalment ${i+1} of ${count} — Amount (Rs)</div>
+        <input id="fInstAmt${i}" type="number" value="${suggestedAmt}" oninput="feeValidateInstSum()"
+          style="width:100%;padding:7px 10px;border:1.5px solid var(--s2);border-radius:6px;font-size:13px;font-weight:700;outline:none;font-family:inherit">
+      </div>
+      <div style="flex:1">
+        <div style="font-size:10.5px;color:var(--s4);margin-bottom:3px">Due Date</div>
+        <input id="fInstDate${i}" type="date" value="${dueDateStr}" oninput="feeValidateInstSum()"
+          style="width:100%;padding:7px 10px;border:1.5px solid var(--s2);border-radius:6px;font-size:13px;outline:none;font-family:inherit">
+      </div>
+    </div>`;
+  }).join('')
+  + `<div id="fInstSumCheck" style="font-size:12px;font-weight:700;padding:8px 12px;border-radius:var(--rads);margin-top:2px"></div>`;
+  feeValidateInstSum();
+}
 
-  // ── Instalment math: how much THIS payment covers, and what's left ──
-  let instLines='', feeLabel='TUITION FEE — FULL PAYMENT';
-  if(f.isInstalment&&f.instTotal){
-    const allInst=D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal);
-    const paidCount=allInst.filter(x=>x.status==='Paid').length;
-    const paidAmt=allInst.filter(x=>x.status==='Paid').reduce((a,b)=>a+b.amt,0);
-    const pendAmt=Math.max(0,f.instTotal-paidAmt);
-    feeLabel=`TUITION FEE — INSTALMENT ${f.instPart||''}`.trim();
-    instLines=
-       li('Total Fee (Full Year)','Rs. '+f.instTotal.toLocaleString())
-      +li('Instalments Paid',paidCount+' of '+allInst.length)
-      +li('Paid So Far (incl. this receipt)','Rs. '+paidAmt.toLocaleString())
-      +li('Remaining Balance', pendAmt>0 ? 'Rs. '+pendAmt.toLocaleString() : 'Rs. 0 — Fully Paid');
+// Re-sums the N (editable) instalment amounts against the Total Fee and
+// shows a clear ✓ / ✗ indicator, disabling Save on mismatch so the system
+// can never save installments that don't add up to the total — this is the
+// core validation rule the whole N-part system depends on. N comes from
+// feeGetInstCount(), same as feeGenInstalments(), so they always agree.
+function feeValidateInstSum(){
+  const fa=parseInt($('fa').value)||0;
+  const count=feeGetInstCount();
+  const amounts=Array.from({length:count},(_,i)=>parseInt(($('fInstAmt'+i)||{}).value)||0);
+  const sum=amounts.reduce((a,b)=>a+b,0);
+  const box=$('fInstSumCheck');
+  const saveBtn=$('fInstSaveBtn');
+  const ok=sum===fa && fa>0;
+  if(box){
+    box.style.background=ok?'var(--g0)':'#fef2f2';
+    box.style.color=ok?'var(--g7)':'#b91c1c';
+    box.style.border='1px solid '+(ok?'var(--g1)':'#fca5a5');
+    box.textContent=ok
+      ? `✓ ${count} instalments total Rs ${sum.toLocaleString()} — matches Total Fee`
+      : `✗ ${count} instalments total Rs ${sum.toLocaleString()} — must equal Total Fee (Rs ${fa.toLocaleString()})`;
   }
-  function li(k,v){ return `<div class="line-item"><span>${k}</span><span>${v}</span></div>`; }
-  function td2(l1,v1,l2,v2){
-    return `<tr><td class="lb">${l1}</td><td class="vl">${v1}</td>`
-      +(l2!==undefined?`<td class="lb">${l2}</td><td class="vl">${v2}</td></tr>`:`<td class="vl" colspan="3"></td></tr>`);
-  }
+  if(saveBtn){ saveBtn.disabled=!ok; saveBtn.style.opacity=ok?'1':'.45'; saveBtn.style.cursor=ok?'pointer':'not-allowed'; }
+  return ok;
+}
 
-  const qrPayload=`RCPT:${f.receipt||''}|ROLL:${f.roll}|AMT:${f.amt}|DATE:${f.date||''}`;
+/* ══════════════════════════════════════════════════
+   INSTALMENT VOUCHERS — IBA-style, printed landscape, all N instalments
+   (or a filtered subset) shown together — N is whatever the plan actually
+   has (2, 3, 4, 6…), never hard-coded to 4. Each voucher shows the
+   COMPLETE payment position (total fee, this instalment, paid, remaining,
+   instalments paid/remaining, status, due date) — not just the instalment
+   amount — per spec.
+   mode: 'all' | 'paid' | 'remaining'
+══════════════════════════════════════════════════ */
+function getOrAssignVoucherNo(f){
+  if(!f.voucherNo) f.voucherNo=nextInstVoucherNo();
+  return f.voucherNo;
+}
+
+function printInstalmentVouchers(roll, instTotal, mode){
+  mode=mode||'all';
+  const stu=D.students.find(s=>s.roll===roll)||{};
+  const plan=instPlanSummary({roll,instTotal});
+  if(!plan.rows.length){toast('No instalment plan found for this student');return;}
+
+  let rows=plan.rows;
+  if(mode==='paid') rows=rows.filter(r=>feeComputeStatus(r)==='Paid');
+  if(mode==='remaining') rows=rows.filter(r=>feeComputeStatus(r)!=='Paid');
+  if(!rows.length){toast(mode==='paid'?'No paid instalments yet':'All instalments are already fully paid');return;}
+
+  const instructions=(D.settings.voucherInstructions&&D.settings.voucherInstructions.length)
+    ? D.settings.voucherInstructions
+    : ['Fee must be deposited on or before the due date.'];
+
+  const voucherCard=(f)=>{
+    const status=feeComputeStatus(f);
+    const paid=feePaidAmt(f);
+    const remaining=feeRemainingAmt(f);
+    const voucherNo=getOrAssignVoucherNo(f);
+    const dueFmtd=f.dueDate?new Date(f.dueDate).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}):'—';
+    const qrPayload=`VCH:${voucherNo}|ROLL:${roll}|INST:${f.instPart}|AMT:${f.amt}|PAID:${paid}`;
+    const isPaid=status==='Paid';
+
+    const infoRow=(label,val)=>`<div class="iv-row"><span class="iv-lb">${label}</span><span class="iv-vl">${val}</span></div>`;
+
+    return `
+    <div class="iv-card">
+      ${isPaid?`<div class="iv-stamp">PAID</div>`:''}
+      <div class="iv-hdr">
+        <div class="iv-logo">${D.settings.logoDataUrl?getLogoBadgeInner():getInstInitials()}</div>
+        <div class="iv-hdr-txt">
+          <div class="iv-inst-name">${D.settings.instName}</div>
+          <div class="iv-inst-sub">${D.settings.address||D.settings.city||''}</div>
+        </div>
+        <div class="qr-slot" data-qr="${qrPayload}"></div>
+      </div>
+      <div class="iv-title">FEE VOUCHER</div>
+
+      ${infoRow('Customer Code',D.settings.customerCode||'—')}
+      ${infoRow('Voucher No.',voucherNo)}
+      ${infoRow('Full Name',f.student)}
+      ${infoRow('Student ID / Roll No.',stu.id?stu.id+' / '+roll:roll)}
+      ${infoRow('Program / Department',(stu.cls||'—')+(stu.dept?' — '+stu.dept:''))}
+      ${infoRow('Semester / Session',(f.sem||'—')+' · '+(D.settings.academicYear||''))}
+      ${infoRow('Instalment',`${f.instPart||(plan.rows.indexOf(f)+1)+'/'+plan.rows.length}`)}
+      ${infoRow('Due Date',dueFmtd)}
+
+      <div class="iv-divider"></div>
+
+      ${infoRow('Total Fee',fmtRs(f.instTotal))}
+      ${infoRow('This Instalment Amount',fmtRs(f.amt))}
+      ${infoRow('Paid Amount',fmtRs(paid))}
+      ${infoRow('Remaining (this instalment)',fmtRs(remaining))}
+      ${infoRow('Instalments Paid',plan.paidCount+' of '+plan.rows.length)}
+      ${infoRow('Instalments Remaining',plan.remainingCount)}
+      ${infoRow('Overall Remaining Fee',fmtRs(plan.totalRemaining))}
+      <div class="iv-row"><span class="iv-lb">Payment Status</span><span class="iv-vl iv-status iv-status-${status.replace('-','')}">${feeStatusLabel(status)}</span></div>
+      ${isPaid?infoRow('Payment Date',f.date&&f.date!=='-'?f.date:'—'):''}
+
+      <div class="iv-divider"></div>
+      <div class="iv-bank">
+        <div class="iv-bank-h">Bank / Payment Details</div>
+        ${infoRow('Bank',D.settings.bankName)}
+        ${infoRow('Branch',D.settings.bankBranch)}
+        ${infoRow('Account Title',D.settings.bankAccountTitle)}
+        ${infoRow('Account No.',D.settings.bankAccountNo)}
+        ${infoRow('IBAN',D.settings.bankIBAN)}
+      </div>
+
+      <div class="iv-instr">
+        <div class="iv-instr-h">Instructions:</div>
+        <ol>${instructions.map(i=>`<li>${i}</li>`).join('')}</ol>
+      </div>
+
+      <div class="iv-sig-row">
+        <div class="iv-sig">Sign. Officer</div>
+        <div class="iv-sig">Sign. Cashier</div>
+      </div>
+      <div class="iv-copy-lbl">Student Copy</div>
+    </div>`;
+  };
+
+  const summaryBar=`
+    <div class="iv-summary">
+      <div><span>Total Fee</span><strong>${fmtRs(plan.totalFee)}</strong></div>
+      <div><span>Total Paid</span><strong>${fmtRs(plan.totalPaid)}</strong></div>
+      <div><span>Remaining</span><strong>${fmtRs(plan.totalRemaining)}</strong></div>
+      <div><span>Instalments Paid</span><strong>${plan.paidCount} of ${plan.rows.length}</strong></div>
+      <div><span>Status</span><strong>${plan.fullyPaid?'FULLY PAID':plan.totalPaid>0?'PARTIALLY PAID':'UNPAID'}</strong></div>
+    </div>`;
 
   const h=`<!DOCTYPE html><html><head><meta charset="UTF-8">
-  <title>Fee Receipt — ${f.student}</title>
+  <title>Fee Vouchers — ${stu.name||''}</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0;}
-    body{font-family:Arial,Helvetica,sans-serif;background:#ccc;padding:24px;color:#000;font-size:11px;}
-    .no-print-bar{max-width:420px;margin:0 auto 12px;background:#111;border-radius:8px;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;}
-    .npb-txt h4{font-size:12.5px;font-weight:700;color:#fff;}
-    .npb-txt p{font-size:10px;color:#bbb;margin-top:2px;}
-    .prt-btn{padding:7px 16px;border:none;border-radius:6px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:#111;}
-    .card{max-width:420px;margin:0 auto;background:#fff;padding:14px 16px 10px;}
-    /* HEADER */
-    .hdr{display:flex;align-items:flex-start;gap:8px;}
-    .hdr-logo{width:32px;height:32px;border-radius:50%;overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;border:1px solid #000;}
-    .hdr-center{flex:1;text-align:center;}
-    .hdr-center .cname{font-size:12.5px;font-weight:800;letter-spacing:.2px;}
-    .hdr-center .doctype{font-size:9px;font-weight:700;letter-spacing:.5px;margin-top:1px;}
-    .hdr-center .addr{font-size:8.5px;color:#333;margin-top:1px;}
-    .qr-slot{width:32px;height:32px;flex-shrink:0;}
-    .hr-dbl{border-top:1px solid #000;border-bottom:1px solid #000;height:3px;margin-top:6px;}
-    /* INFO TABLE */
-    .info-tbl{width:100%;border-collapse:collapse;margin-top:6px;font-size:10px;}
-    .info-tbl td{padding:2px 2px;vertical-align:top;}
-    .info-tbl .lb{color:#000;white-space:nowrap;padding-right:4px;}
-    .info-tbl .vl{font-weight:700;padding-right:10px;}
-    /* FEE DESC */
-    .fee-desc{margin-top:6px;padding:3px 0;border-top:1px solid #000;border-bottom:1px solid #000;font-size:10px;font-weight:700;}
-    .line-item{display:flex;justify-content:space-between;padding:3px 0;font-size:10px;}
-    .hr{border-top:1px solid #000;margin-top:2px;}
-    .spacer{height:46px;}
-    .spacer-sm{height:22px;}
-    .total-row{display:flex;justify-content:space-between;padding:2px 0;font-size:11px;font-weight:700;}
-    .total-row .tv{border-bottom:1.5px solid #000;padding-bottom:1px;min-width:70px;text-align:right;}
-    .words{font-size:8.5px;color:#333;font-style:italic;margin-top:3px;}
-    /* NOTES */
-    .notes{margin-top:8px;font-size:8px;color:#000;line-height:1.55;}
-    .notes strong{display:block;font-size:8.5px;margin-bottom:1px;}
-    .ftr{margin-top:6px;font-size:7.5px;color:#555;font-style:italic;}
+    body{font-family:Georgia,'Times New Roman',serif;background:#ccc;padding:20px;color:#000;}
+    .no-print-bar{max-width:1200px;margin:0 auto 14px;background:#111;border-radius:8px;padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-family:Arial,sans-serif;}
+    .npb-txt h4{font-size:13px;font-weight:700;color:#fff;}
+    .npb-txt p{font-size:10.5px;color:#bbb;margin-top:2px;}
+    .prt-btn{padding:9px 20px;border:none;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:#111;}
+    .wrap{max-width:1200px;margin:0 auto;}
+    .iv-summary{display:flex;gap:0;background:#fff;border:2px solid #000;margin-bottom:14px;font-family:Arial,sans-serif;}
+    .iv-summary div{flex:1;text-align:center;padding:8px 4px;border-right:1px solid #000;}
+    .iv-summary div:last-child{border-right:none;}
+    .iv-summary span{display:block;font-size:8.5px;text-transform:uppercase;letter-spacing:.5px;color:#444;}
+    .iv-summary strong{font-size:12.5px;}
+    /* Landscape layout: the page prints in landscape A4, and the grid
+       auto-fits as many voucher cards per row as fit the wider page —
+       however many instalments the plan actually has (2, 3, 4, 6…),
+       never a fixed "4" — so a 2-instalment plan shows 2 cards side by
+       side and a 3-instalment plan shows 3, instead of always reserving
+       4 slots. */
+    .iv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;}
+    .iv-card{position:relative;background:#fff;border:2px solid #000;padding:14px 16px;font-size:10px;overflow:hidden;}
+    .iv-stamp{position:absolute;top:60px;right:18px;border:3px solid #16a34a;color:#16a34a;font-weight:900;font-size:22px;letter-spacing:3px;padding:2px 14px;transform:rotate(-18deg);opacity:.65;font-family:Arial,sans-serif;}
+    .iv-hdr{display:flex;align-items:center;gap:8px;}
+    .iv-logo{width:36px;height:36px;border:1px solid #000;border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;font-family:Arial,sans-serif;flex-shrink:0;overflow:hidden;}
+    .iv-hdr-txt{flex:1;}
+    .iv-inst-name{font-size:13px;font-weight:800;font-family:Arial,sans-serif;}
+    .iv-inst-sub{font-size:8.5px;color:#333;font-family:Arial,sans-serif;}
+    .qr-slot{width:34px;height:34px;flex-shrink:0;}
+    .iv-title{text-align:center;font-size:16px;font-weight:800;margin:8px 0 6px;}
+    .iv-row{display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid #000;font-family:Arial,sans-serif;}
+    .iv-lb{color:#000;}
+    .iv-vl{font-weight:700;text-align:right;}
+    .iv-status-Paid{color:#065f46;}
+    .iv-status-Partial,.iv-status-PartialOverdue{color:#92400e;}
+    .iv-status-Overdue{color:#b91c1c;}
+    .iv-status-Pending{color:#444;}
+    .iv-divider{border-top:2px solid #000;margin:6px 0;}
+    .iv-bank-h,.iv-instr-h{font-weight:800;font-size:10px;margin:4px 0 3px;font-family:Arial,sans-serif;}
+    .iv-instr ol{padding-left:16px;font-size:8.5px;line-height:1.5;font-family:Arial,sans-serif;}
+    .iv-sig-row{display:flex;justify-content:space-between;margin-top:22px;font-family:Arial,sans-serif;font-size:9.5px;}
+    .iv-sig{border-top:1px solid #000;padding-top:3px;width:40%;text-align:center;}
+    .iv-copy-lbl{text-align:center;font-weight:800;font-size:11px;margin-top:14px;font-family:Arial,sans-serif;}
     @media print{
       body{background:#fff!important;padding:0!important;}
       .no-print-bar{display:none!important;}
-      .card{margin:0!important;max-width:none!important;}
-      @page{size:A4;margin:14mm;}
+      .iv-card{page-break-inside:avoid;}
+      @page{size:A4 landscape;margin:10mm;}
     }
   </style></head><body>
   <div class="no-print-bar">
-    <div class="npb-txt"><h4>Fee Receipt — ${f.student}</h4><p>Receipt No. ${f.receipt||'—'} &nbsp;·&nbsp; Amount: Rs ${f.amt.toLocaleString()}</p></div>
+    <div class="npb-txt"><h4>Fee Vouchers — ${stu.name||''}</h4><p>${rows.length} voucher(s) · ${mode==='all'?`All ${plan.rows.length} instalments`:mode==='paid'?'Paid instalments':'Remaining instalments'} · Landscape</p></div>
     <button class="prt-btn" onclick="window.print()">🖨️ Print</button>
   </div>
-  <div class="card">
-    <div class="hdr">
-      <div class="hdr-logo">${hasRealLogo?logoBadge:getInstInitials()}</div>
-      <div class="hdr-center">
-        <div class="cname">${(D.settings.instName||'').toUpperCase()}</div>
-        <div class="doctype">FEE PAYMENT RECEIPT</div>
-        <div class="addr">${D.settings.address||D.settings.city||''}</div>
-      </div>
-      <div class="qr-slot" data-qr="${qrPayload}"></div>
-    </div>
-    <div class="hr-dbl"></div>
-
-    <table class="info-tbl">
-      ${td2('Receipt No.',f.receipt||'—','Dated',(f.date&&f.date!=='-')?f.date:'—')}
-      <tr><td class="lb">Student Name</td><td class="vl" colspan="3">${f.student}</td></tr>
-      ${td2("Father's Name",stu.father||'—','Roll No.',f.roll)}
-      <tr><td class="lb">Student Class</td><td class="vl" colspan="3">${(stu.cls||'—')}${stu.section?' ('+stu.section+')':''}</td></tr>
-      ${td2('Payment Method',(f.method&&f.method!=='-')?f.method:'—', f.isInstalment?'Instalment':'Semester', f.isInstalment?(f.instPart||'—'):(f.sem||'—'))}
-    </table>
-
-    <div class="fee-desc">${feeLabel} — ${D.settings.academicYear||''}</div>
-    ${li((f.category||'Tuition Fee'), 'Rs. '+f.amt.toLocaleString())}
-    ${instLines}
-    <div class="hr"></div>
-    <div class="spacer"></div>
-    <div class="total-row"><span>Fee Total:</span><span class="tv">${f.amt.toLocaleString()}</span></div>
-    <div class="words">${amountInWords(f.amt)}</div>
-    <div class="hr"></div>
-    <div class="spacer-sm"></div>
-
-    <div class="notes">
-      <strong>Note:</strong>
-      • This is a computer-generated receipt issued against the amount received above.<br>
-      • Please retain this receipt for your record — it is proof of payment.<br>
-      • Scan the QR code above to view the full fee voucher in digital form.<br>
-      • The fee once paid will not be refunded or transferred in any circumstances.
-    </div>
-    <div class="ftr">Printed from ${D.settings.instName} — Online Fee Management System</div>
+  <div class="wrap">
+    ${summaryBar}
+    <div class="iv-grid">${rows.map(voucherCard).join('')}</div>
   </div>
   <script>
     (function renderQrSlots(attemptsLeft){
@@ -3818,7 +4024,195 @@ function printReceipt(idx){
       document.querySelectorAll('.qr-slot').forEach(function(el){
         if (el.dataset.rendered) return;
         el.dataset.rendered = '1';
-        new QRCode(el, { text: el.dataset.qr, width: 32, height: 32, colorDark: '#000000', colorLight: '#ffffff' });
+        new QRCode(el, { text: el.dataset.qr, width: 34, height: 34, colorDark: '#000000', colorLight: '#ffffff' });
+      });
+    })(25);
+  <\/script>
+  </body></html>`;
+  showPrintPreview(h,'Fee Vouchers - '+(stu.name||roll));
+}
+
+function fmtRs(n){ return 'Rs. '+(n||0).toLocaleString(); }
+
+/* ══════════════════════════════════════════════════
+   FEE PAYMENT RECEIPT — full A4, branded to match the Fee Voucher (same
+   header style, colours, logo) instead of a small 420px thermal-slip look.
+   Always shows: Amount Received (this payment) + Outstanding/Remaining
+   Balance clearly, so an instalment payment reads exactly like a real
+   college receipt — "paid this much, this much is still due" — at a
+   glance, not buried in a line-item list.
+══════════════════════════════════════════════════ */
+function printReceipt(idx, paymentAmount){
+  const f=D.fees[idx];
+  if(!f){toast('Receipt not found');return;}
+  const stu=D.students.find(s=>s.roll===f.roll)||{};
+
+  // The "Amount Received" on a receipt must reflect what was actually paid
+  // IN THIS TRANSACTION — not the full instalment amount owed, which can
+  // now differ when a payment is partial. Callers that just recorded a
+  // specific payment (e.g. saveFee's partial-payment path) pass that exact
+  // amount in; everywhere else (older full-payment call sites) falls back
+  // to the cumulative paid-so-far, which is correct for a one-shot full
+  // payment.
+  const receivedNow = paymentAmount!=null ? paymentAmount : feePaidAmt(f);
+
+  const todayFmt = new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+  const academicYear = getAcademicYear();
+  const qrPayload = `RCPT:${f.receipt||''}|ROLL:${f.roll}|AMT:${receivedNow}|DATE:${f.date||''}`;
+
+  // ── Instalment math: total fee, paid-to-date, and what's still owed ──
+  const isInstalment = !!(f.isInstalment && f.instTotal);
+  let feeLabel='Tuition Fee — Full Payment', totalFeeForDoc=f.amt, paidToDate=receivedNow,
+      outstanding=0, instRows='', instCount='', instPaidCount=0;
+  if(isInstalment){
+    const allInst=D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal);
+    instPaidCount=allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
+    instCount=allInst.length;
+    paidToDate=allInst.reduce((a,b)=>a+feePaidAmt(b),0);
+    totalFeeForDoc=f.instTotal;
+    outstanding=Math.max(0,totalFeeForDoc-paidToDate);
+    feeLabel=`Tuition Fee — Instalment ${f.instPart||''}`.trim();
+    instRows = allInst.map((inst,i)=>{
+      const st=feeComputeStatus(inst);
+      const isPaidRow=st==='Paid', isThis=inst===f;
+      return `<tr style="background:${isPaidRow?'#f0fdf4':isThis?'#fffbeb':'#fff'}">
+        <td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:center;font-weight:${isThis?800:600}">${inst.instPart||(i+1)+'/'+allInst.length}</td>
+        <td style="padding:5px 8px;border:1px solid #e2e8f0">${inst.dueDate||'—'}</td>
+        <td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:700">Rs ${inst.amt.toLocaleString()}</td>
+        <td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:center;font-size:9.5px;font-weight:800;color:${isPaidRow?'#065f46':st.includes('Overdue')?'#b91c1c':'#92400e'}">${feeStatusLabel(st)}${isThis?' ◀':''}</td>
+      </tr>`;
+    }).join('');
+  }else{
+    outstanding = Math.max(0, (f.amt||0) - receivedNow);
+  }
+
+  const FONT = `-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Arial,sans-serif`;
+  const brand='#0d7a4f', brandDeep='#0a3d2a';
+  const fullyPaid = outstanding<=0;
+
+  const infoRow=(l,v)=>`<tr><td style="padding:5px 2px;color:#64748b;font-size:10.5px;width:38%">${l}</td><td style="padding:5px 2px;font-weight:700;color:#0f172a;font-size:11.5px">${v}</td></tr>`;
+
+  const h=`<!DOCTYPE html><html><head><meta charset="UTF-8">
+  <title>Fee Receipt — ${f.student} — ${f.receipt||''}</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:${FONT};background:#ccc;padding:20px;color:#0f172a;}
+    .no-print-bar{max-width:800px;margin:0 auto 14px;background:#111;border-radius:8px;padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;}
+    .npb-txt h4{font-size:13px;font-weight:700;color:#fff;}
+    .npb-txt p{font-size:10.5px;color:#bbb;margin-top:2px;}
+    .prt-btn{padding:9px 20px;border:none;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:#111;}
+    .sheet{max-width:800px;margin:0 auto;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,.10);border:1px solid #eef0f2;}
+    @media print{
+      body{background:#fff!important;padding:0!important;}
+      .no-print-bar{display:none!important;}
+      .sheet{box-shadow:none!important;border-radius:0!important;border:none!important;max-width:none!important;}
+      @page{size:A4;margin:12mm;}
+    }
+  </style></head><body>
+  <div class="no-print-bar">
+    <div class="npb-txt"><h4>Fee Receipt — ${f.student}</h4><p>Receipt No. ${f.receipt||'—'} &nbsp;·&nbsp; Amount Received: Rs ${receivedNow.toLocaleString()}</p></div>
+    <button class="prt-btn" onclick="window.print()">🖨️ Print</button>
+  </div>
+  <div class="sheet">
+
+    <!-- HEADER -->
+    <div style="background:linear-gradient(135deg,${brandDeep},${brand});padding:0">
+      <div style="display:flex;align-items:stretch;min-height:92px">
+        <div style="width:76px;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:14px 10px">
+          <div style="width:52px;height:52px;border-radius:16px;background:rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;color:#fff;border:1px solid rgba(255,255,255,.25);overflow:hidden">${getLogoBadgeInner()}</div>
+        </div>
+        <div style="flex:1;padding:16px 14px 14px 4px;display:flex;flex-direction:column;justify-content:center">
+          <div style="font-size:19px;font-weight:800;color:#fff;letter-spacing:-.2px;line-height:1.15">${D.settings.instName||''}</div>
+          <div style="font-size:10.5px;color:rgba(255,255,255,.65);margin-top:3px;font-weight:500">${D.settings.city||''} · Accounts Department · AY ${academicYear}</div>
+          <div style="margin-top:9px;display:inline-flex">
+            <span style="background:rgba(255,255,255,.16);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:4px 12px;border-radius:20px">OFFICIAL FEE RECEIPT</span>
+          </div>
+        </div>
+        <div style="width:120px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px 10px">
+          <div style="background:rgba(255,255,255,.12);border-radius:10px;padding:5px 10px;text-align:center;width:100%">
+            <div style="font-size:7.5px;color:rgba(255,255,255,.6);letter-spacing:1px;text-transform:uppercase;font-weight:600">Receipt No.</div>
+            <div style="font-size:12px;font-weight:800;color:#fff;margin-top:1px">${f.receipt||'—'}</div>
+          </div>
+          <div class="qr-slot" data-qr="${qrPayload}" style="width:52px;height:52px;background:#fff;padding:3px;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="padding:22px 26px 26px">
+      <!-- STUDENT + PAYMENT INFO -->
+      <table style="width:100%;border-collapse:collapse;margin-bottom:14px">
+        <tr>
+          <td style="width:50%;vertical-align:top;padding-right:14px">
+            <table style="width:100%;border-collapse:collapse">
+              ${infoRow('Student Name',f.student)}
+              ${infoRow('Roll No.',f.roll)}
+              ${infoRow("Father's Name",stu.father||'—')}
+              ${infoRow('Class / Section',(stu.cls||'—')+(stu.section?' ('+stu.section+')':''))}
+            </table>
+          </td>
+          <td style="width:50%;vertical-align:top">
+            <table style="width:100%;border-collapse:collapse">
+              ${infoRow('Date Received',(f.date&&f.date!=='-')?f.date:todayFmt)}
+              ${infoRow('Payment Method',(f.method&&f.method!=='-')?f.method:'—')}
+              ${infoRow(isInstalment?'Instalment':'Semester / Year',isInstalment?(f.instPart||'—')+' of '+instCount:(f.sem||'—'))}
+              ${infoRow('Fee Head',f.category&&f.category!=='Tuition'?f.category:'Tuition Fee')}
+            </table>
+          </td>
+        </tr>
+      </table>
+
+      <div style="font-size:10px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:${brand};border-top:2px solid #eef0f2;border-bottom:2px solid #eef0f2;padding:8px 0;margin-bottom:14px">${feeLabel} — AY ${academicYear}</div>
+
+      <!-- AMOUNT RECEIVED / OUTSTANDING CALLOUT -->
+      <div style="display:flex;gap:12px;margin-bottom:16px">
+        <div style="flex:1;background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:12px;padding:14px 16px">
+          <div style="font-size:9.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#065f46">Amount Received (This Payment)</div>
+          <div style="font-size:24px;font-weight:800;color:#065f46;margin-top:4px">Rs ${receivedNow.toLocaleString()}</div>
+          <div style="font-size:9.5px;color:#166534;margin-top:3px;font-style:italic">${amountInWords(receivedNow)}</div>
+        </div>
+        <div style="flex:1;background:${fullyPaid?'#f0fdf4':'#fef2f2'};border:1.5px solid ${fullyPaid?'#bbf7d0':'#fecaca'};border-radius:12px;padding:14px 16px">
+          <div style="font-size:9.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${fullyPaid?'#065f46':'#b91c1c'}">${fullyPaid?'Status':'Outstanding Balance'}</div>
+          <div style="font-size:24px;font-weight:800;color:${fullyPaid?'#065f46':'#b91c1c'};margin-top:4px">${fullyPaid?'FULLY PAID':'Rs '+outstanding.toLocaleString()}</div>
+          <div style="font-size:9.5px;color:${fullyPaid?'#166534':'#991b1b'};margin-top:3px">${isInstalment?`${instPaidCount} of ${instCount} instalments paid · Total Fee Rs ${totalFeeForDoc.toLocaleString()}`:fullyPaid?'No balance remaining':'Balance still due on this fee'}</div>
+        </div>
+      </div>
+
+      ${isInstalment?`
+      <!-- INSTALMENT SCHEDULE -->
+      <div style="font-size:10px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:#475569;margin-bottom:6px">Instalment Schedule</div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:16px;font-size:10.5px">
+        <thead><tr style="background:#f8fafc">
+          <th style="padding:6px 8px;border:1px solid #e2e8f0;font-size:9px;text-transform:uppercase;color:#64748b">Inst.</th>
+          <th style="padding:6px 8px;border:1px solid #e2e8f0;font-size:9px;text-transform:uppercase;color:#64748b;text-align:left">Due Date</th>
+          <th style="padding:6px 8px;border:1px solid #e2e8f0;font-size:9px;text-transform:uppercase;color:#64748b;text-align:right">Amount</th>
+          <th style="padding:6px 8px;border:1px solid #e2e8f0;font-size:9px;text-transform:uppercase;color:#64748b">Status</th>
+        </tr></thead>
+        <tbody>${instRows}</tbody>
+      </table>`:''}
+
+      <!-- SIGNATURES -->
+      <div style="display:flex;justify-content:space-between;margin-top:34px">
+        <div style="width:38%;text-align:center;border-top:1px solid #cbd5e1;padding-top:6px;font-size:10.5px;color:#475569">Sign. Cashier</div>
+        <div style="width:38%;text-align:center;border-top:1px solid #cbd5e1;padding-top:6px;font-size:10.5px;color:#475569">Sign. Accounts Officer</div>
+      </div>
+
+      <div style="margin-top:20px;font-size:8.5px;color:#94a3b8;line-height:1.6;border-top:1px solid #eef0f2;padding-top:10px">
+        This is a computer-generated receipt issued against the amount received above. Please retain it as proof of payment. Fee once paid is non-refundable and non-transferable. Scan the QR code above to verify this receipt online.
+        <br>Generated ${todayFmt} · Printed from ${D.settings.instName} — Online Fee Management System
+      </div>
+    </div>
+  </div>
+  <script>
+    (function renderQrSlots(attemptsLeft){
+      if (typeof QRCode === 'undefined') {
+        if (attemptsLeft > 0) return void setTimeout(function(){ renderQrSlots(attemptsLeft-1); }, 200);
+        return;
+      }
+      document.querySelectorAll('.qr-slot').forEach(function(el){
+        if (el.dataset.rendered) return;
+        el.dataset.rendered = '1';
+        new QRCode(el, { text: el.dataset.qr, width: 46, height: 46, colorDark: '#000000', colorLight: '#ffffff' });
       });
     })(25);
   <\/script>
@@ -3951,9 +4345,9 @@ function printVoucher(idx){
   let allInst=[], paidCount=0, totalCount=0, paidAmt=0, remainAmt=0;
   if(isInstalment){
     allInst    = D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal);
-    paidCount  = allInst.filter(x=>x.status==='Paid').length;
+    paidCount  = allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
     totalCount = allInst.length;
-    paidAmt    = allInst.filter(x=>x.status==='Paid').reduce((a,b)=>a+b.amt,0);
+    paidAmt    = allInst.reduce((a,b)=>a+feePaidAmt(b),0);
     remainAmt  = f.instTotal - paidAmt;
   }
 
@@ -4468,6 +4862,11 @@ function quickCollect(idx){
   if(!f) return;
   const stu=D.students.find(s=>s.roll===f.roll);
   if(!stu){ toast('Student not found'); return; }
+
+  // Instalment records go through the proper partial-payment editor (Step 2)
+  // instead of this shortcut's old "jump straight to full-paid" path — that
+  // path didn't populate the Amount Being Paid Now field at all.
+  if(f.isInstalment){ openEditFee(idx); return; }
 
   openAddFee();
 
@@ -5607,9 +6006,11 @@ function rReports(){
   // Build income (paid fees + paid transport fees) per month
   var incomeMap={};
   monthLabels.forEach(m=>incomeMap[m]=0);
-  fFees.filter(f=>f.status==='Paid').forEach(f=>{
+  fFees.forEach(f=>{
+    var amt=feePaidAmt(f);
+    if(!amt)return;
     var m=toMonthLabel(f.date);
-    if(m&&incomeMap.hasOwnProperty(m))incomeMap[m]+=f.amt;
+    if(m&&incomeMap.hasOwnProperty(m))incomeMap[m]+=amt;
   });
   fTransportFees.filter(t=>t.status==='Paid').forEach(t=>{
     var m=toMonthLabel(t.date);
@@ -5681,7 +6082,7 @@ function rpShow(type){
   // total below so Reports match the Dashboard's fee-inclusive numbers.
   const filteredTransportFees=D.transportFees.filter(t=>_rpDateInRange(t.date));
 
-  const income=filteredFees.filter(f=>f.status==='Paid').reduce((a,b)=>a+b.amt,0)+filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
+  const income=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
   const expTot=filteredExpenses.reduce((a,b)=>a+b.amt,0);
   const salTot=filteredSalaries.filter(s=>s.status==='Paid').reduce((a,b)=>a+netPay(b),0);
   const allExp=expTot+salTot;
@@ -6022,7 +6423,7 @@ function rpShow(type){
         return isNaN(d.getTime())?null:d.toLocaleString('default',{month:'short',year:'numeric'});
       }
       const bMMap={};
-      filteredFees.filter(f=>f.status==='Paid').forEach(f=>{var m=bMLabel(f.date);if(m){bMMap[m]=bMMap[m]||{inc:0,exp:0};bMMap[m].inc+=f.amt;}});
+      filteredFees.forEach(f=>{var amt=feePaidAmt(f);if(!amt)return;var m=bMLabel(f.date);if(m){bMMap[m]=bMMap[m]||{inc:0,exp:0};bMMap[m].inc+=amt;}});
       filteredTransportFees.filter(t=>t.status==='Paid').forEach(t=>{var m=bMLabel(t.date);if(m){bMMap[m]=bMMap[m]||{inc:0,exp:0};bMMap[m].inc+=t.amt;}});
       filteredExpenses.forEach(e=>{var m=bMLabel(e.date);if(m){bMMap[m]=bMMap[m]||{inc:0,exp:0};bMMap[m].exp+=e.amt;}});
       filteredSalaries.filter(s=>s.status==='Paid').forEach(s=>{var m=bSalLabel(s.month);if(m){bMMap[m]=bMMap[m]||{inc:0,exp:0};bMMap[m].exp+=(netPay(s));}});
@@ -6083,7 +6484,7 @@ function rpShow(type){
 
       // ── Fee numbers (includes Transport Fee — real college income) ──
       const feeBilled=D.students.reduce((a,s)=>a+s.fee,0)+filteredTransportFees.reduce((a,b)=>a+b.amt,0);
-      const feeCollected=filteredFees.filter(f=>f.status==='Paid').reduce((a,b)=>a+b.amt,0)+filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
+      const feeCollected=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
       const feePending=filteredFees.filter(f=>f.status!=='Paid').reduce((a,b)=>a+b.amt,0)+filteredTransportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0);
       const collRate=feeBilled>0?(feeCollected/feeBilled*100):0;
 
@@ -6106,8 +6507,9 @@ function rpShow(type){
 
       // ── Month-wise breakdown ──
       const mMap={};
-      filteredFees.filter(f=>f.status==='Paid').forEach(f=>{
-        var m=mLabel(f.date);if(m){mMap[m]=mMap[m]||{inc:0,exp:0};mMap[m].inc+=f.amt;}
+      filteredFees.forEach(f=>{
+        var amt=feePaidAmt(f);if(!amt)return;
+        var m=mLabel(f.date);if(m){mMap[m]=mMap[m]||{inc:0,exp:0};mMap[m].inc+=amt;}
       });
       filteredTransportFees.filter(t=>t.status==='Paid').forEach(t=>{
         var m=mLabel(t.date);if(m){mMap[m]=mMap[m]||{inc:0,exp:0};mMap[m].inc+=t.amt;}
@@ -6485,7 +6887,7 @@ function exportReport(format){
     colWidths=[35,18,14,14,18,12];
   } else if(type==='balance'){
     var tfInc=filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
-    var inc=filteredFees.filter(f=>f.status==='Paid').reduce((a,b)=>a+b.amt,0)+tfInc;
+    var inc=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+tfInc;
     var salExp=filteredSalaries.filter(s=>s.status==='Paid').reduce((a,b)=>a+netPay(b),0);
     var othExp=filteredExpenses.reduce((a,b)=>a+b.amt,0);
     var net=inc-salExp-othExp;
@@ -6505,7 +6907,7 @@ function exportReport(format){
     // Multi-section annual export
     headers=['Section','Item','Value'];
     var aTfInc=filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
-    var aInc=filteredFees.filter(f=>f.status==='Paid').reduce((a,b)=>a+b.amt,0)+aTfInc;
+    var aInc=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+aTfInc;
     var aSal=filteredSalaries.filter(s=>s.status==='Paid').reduce((a,b)=>a+netPay(b),0);
     var aExp=filteredExpenses.reduce((a,b)=>a+b.amt,0);
     var aNet=aInc-aSal-aExp;
@@ -7230,18 +7632,21 @@ document.addEventListener('click', function(e){
 
 function rDash(){
   // ── Counts ──
-  const paid   = D.fees.filter(f=>f.status==='Paid');
-  const pend   = D.fees.filter(f=>f.status==='Pending');
-  const over   = D.fees.filter(f=>f.status==='Overdue');
+  // Uses feePaidAmt/feeRemainingAmt (not a plain status==='Paid' filter on
+  // f.amt) so a partially-paid instalment contributes its paid portion to
+  // "collected" and only its true remaining balance to "pending/overdue" —
+  // otherwise partial cash already received would vanish from every total.
+  const pend   = D.fees.filter(f=>f.status==='Pending'||f.status==='Partial');
+  const over   = D.fees.filter(f=>f.status==='Overdue'||f.status==='Partial-Overdue');
   // Transport Fee is its own module (D.transportFees) but is still real
   // college income, so it must be folded into the dashboard's fee totals
   // (progress bar, this-month collected, pending/overdue, balance summary).
   const tfPaidRecs = D.transportFees.filter(t=>t.status==='Paid');
   const tfPendRecs = D.transportFees.filter(t=>t.status==='Pending');
   const tfOverRecs = D.transportFees.filter(t=>t.status==='Overdue');
-  const fPaid  = paid.reduce((a,b)=>a+b.amt,0) + tfPaidRecs.reduce((a,b)=>a+b.amt,0);
-  const fPend  = pend.reduce((a,b)=>a+b.amt,0) + tfPendRecs.reduce((a,b)=>a+b.amt,0);
-  const fOver  = over.reduce((a,b)=>a+b.amt,0) + tfOverRecs.reduce((a,b)=>a+b.amt,0);
+  const fPaid  = D.fees.reduce((a,b)=>a+feePaidAmt(b),0) + tfPaidRecs.reduce((a,b)=>a+b.amt,0);
+  const fPend  = pend.reduce((a,b)=>a+feeRemainingAmt(b),0) + tfPendRecs.reduce((a,b)=>a+b.amt,0);
+  const fOver  = over.reduce((a,b)=>a+feeRemainingAmt(b),0) + tfOverRecs.reduce((a,b)=>a+b.amt,0);
   const fTotal = D.fees.reduce((a,b)=>a+b.amt,0) + D.transportFees.reduce((a,b)=>a+b.amt,0);
   const totExp = D.expenses.reduce((a,b)=>a+b.amt,0);
   const totSal = D.salaries.filter(s=>s.status==='Paid').reduce((a,b)=>a+netPay(b),0);
@@ -7267,7 +7672,12 @@ function rDash(){
   // current calendar month — not the all-time total (that's what
   // "Overall Target" / "Total Income" further down are for).
   const now = new Date();
-  const paidThisMonth = paid.filter(f=>{
+  // Note: this buckets by each fee record's most-recent-payment date. For a
+  // fee paid across multiple partial payments in different months, the full
+  // cumulative amount is attributed to the latest month (D.feePayments has
+  // the precise per-transaction log if exact month-splitting is ever needed).
+  const paidFeesList = D.fees.filter(f=>feePaidAmt(f)>0);
+  const paidThisMonth = paidFeesList.filter(f=>{
     const d = txParseDate(f.date);
     return d && d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth();
   });
@@ -7275,7 +7685,7 @@ function rDash(){
     const d = txParseDate(t.date);
     return d && d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth();
   });
-  const fPaidThisMonth = paidThisMonth.reduce((a,b)=>a+b.amt,0) + tfPaidThisMonth.reduce((a,b)=>a+b.amt,0);
+  const fPaidThisMonth = paidThisMonth.reduce((a,b)=>a+feePaidAmt(b),0) + tfPaidThisMonth.reduce((a,b)=>a+b.amt,0);
   $('db-f').textContent = 'Rs '+fmt(fPaidThisMonth);
   if($('db-f-sub')) $('db-f-sub').innerHTML = `<span style="color:var(--g6)">+${paidThisMonth.length+tfPaidThisMonth.length} receipts this month</span>`;
 
@@ -7289,7 +7699,7 @@ function rDash(){
   const pbarEl=$('db-fee-pbar'); if(pbarEl){ pbarEl.style.width=pct+'%'; pbarEl.style.background=pct>=75?'linear-gradient(90deg,var(--g6),var(--g4))':pct>=50?'linear-gradient(90deg,var(--yl),#fbbf24)':'linear-gradient(90deg,var(--rd),#f87171)'; }
   const badgeEl=$('db-fee-pct-badge'); if(badgeEl){ badgeEl.textContent=pct+'% Collected'; badgeEl.className='badge '+(pct>=75?'bg-g':pct>=50?'bg-y':'bg-r'); }
   if($('db-fee-prog-lbl')) $('db-fee-prog-lbl').textContent='Rs '+fmt(fPaid)+' / Rs '+fmt(fTotal);
-  if($('db-pc-paid')) $('db-pc-paid').textContent=paid.length;
+  if($('db-pc-paid')) $('db-pc-paid').textContent=paidFeesList.length;
   if($('db-pc-pend')) $('db-pc-pend').textContent=pend.length;
   if($('db-pc-over')) $('db-pc-over').textContent=over.length;
 
@@ -7306,7 +7716,7 @@ function rDash(){
       const stus=D.students.filter(p.filter);
       const feesForStus=D.fees.filter(f=>stus.some(s=>s.roll===f.roll));
       const tfForStus=D.transportFees.filter(t=>stus.some(s=>s.roll===t.roll));
-      const paidAmt=feesForStus.filter(f=>f.status==='Paid').reduce((a,b)=>a+b.amt,0)+tfForStus.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
+      const paidAmt=feesForStus.reduce((a,b)=>a+feePaidAmt(b),0)+tfForStus.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
       const totAmt=feesForStus.reduce((a,b)=>a+b.amt,0)+tfForStus.reduce((a,b)=>a+b.amt,0);
       const pp=totAmt>0?Math.round((paidAmt/totAmt)*100):0;
       const cnt=stus.length;
@@ -7415,6 +7825,53 @@ function rDash(){
 // Inter = full year (12 months)
 function getInstInterval(cls, count){
   return Math.max(1,Math.round(12/count));
+}
+
+/* ══════════════════════════════════════════════════
+   4-PART INSTALMENT SYSTEM — partial-payment-aware helpers
+   Every instalment fee record now tracks `paidAmt` (cumulative amount
+   actually paid against it) separately from `amt` (amount owed), so a
+   student can pay less than the full instalment in one go. Status is
+   always DERIVED from these two numbers — never trusted as free text —
+   so it can't drift out of sync with the real payment figures.
+   Old records that predate this field (status==='Paid' with no paidAmt
+   set) are treated as fully paid for backward compatibility.
+══════════════════════════════════════════════════ */
+function feePaidAmt(f){
+  if(f.paidAmt!=null) return f.paidAmt;
+  return f.status==='Paid' ? f.amt : 0;
+}
+function feeRemainingAmt(f){
+  return Math.max(0, f.amt - feePaidAmt(f));
+}
+function feeComputeStatus(f){
+  const paid=feePaidAmt(f);
+  if(paid>=f.amt) return 'Paid';
+  const today=new Date(); today.setHours(0,0,0,0);
+  const due=f.dueDate?new Date(f.dueDate):null; if(due) due.setHours(0,0,0,0);
+  const overdue=due && due<today;
+  if(paid>0) return overdue?'Partial-Overdue':'Partial';
+  return overdue?'Overdue':'Pending';
+}
+function feeStatusLabel(status){
+  return {Paid:'PAID',Partial:'PARTIALLY PAID','Partial-Overdue':'PARTIALLY PAID (OVERDUE)',Overdue:'OVERDUE',Pending:'UNPAID'}[status]||status.toUpperCase();
+}
+// All instalment rows belonging to the same 4-part plan as fee record `f`.
+function instPlanRows(f){
+  return D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal)
+    .sort((a,b)=>(a.instIdx??0)-(b.instIdx??0));
+}
+function instPlanSummary(f){
+  const rows=instPlanRows(f);
+  const totalFee=f.instTotal;
+  const totalPaid=rows.reduce((s,r)=>s+feePaidAmt(r),0);
+  const paidCount=rows.filter(r=>feeComputeStatus(r)==='Paid').length;
+  return {
+    rows, totalFee, totalPaid,
+    totalRemaining:Math.max(0,totalFee-totalPaid),
+    paidCount, remainingCount:rows.length-paidCount,
+    fullyPaid: paidCount===rows.length && rows.length>0
+  };
 }
 
 /* ══════════════════════════════════════════════════
@@ -7969,4 +8426,4 @@ function renderPendingSalAlert(){
         </div>
       </div>
     </div>`;
-}
+}\
