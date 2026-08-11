@@ -1383,13 +1383,23 @@
             <option>1st Year</option><option>2nd Year</option>
           </select>
         </div>
-        <div class="mf">
+        <div class="mf" id="fStatusWrap">
           <label>Payment Status</label>
           <select id="fst" style="width:100%;padding:10px 13px;border:1.5px solid var(--s2);border-radius:var(--rads);font-size:14px;outline:none;font-family:inherit;background:#fff" onchange="feeStatusChange(this.value)">
             <option value="Paid">✅ Paid</option>
             <option value="Pending">⏳ Pending</option>
             <option value="Overdue">❌ Overdue</option>
           </select>
+        </div>
+        <div class="mf" id="fPartialPayWrap" style="display:none">
+          <label>Record Payment</label>
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--s4);margin-bottom:6px">
+            <span>Already Paid: <strong id="fPay-already">Rs 0</strong></span>
+            <span>Total Payable: <strong id="fPay-owed">Rs 0</strong></span>
+          </div>
+          <label style="font-size:12px;font-weight:600;margin-top:2px">Pay Now (Rs)</label>
+          <input id="fPayNow" type="number" min="0" oninput="feePreviewPartial()" style="width:100%;padding:10px 13px;border:1.5px solid var(--s2);border-radius:var(--rads);font-size:14px;outline:none;font-family:inherit">
+          <div id="fPay-preview" style="font-size:12px;margin-top:6px;font-weight:600"></div>
         </div>
         <div class="mf" id="fpm-wrap">
           <label>Payment Method</label>
@@ -1453,7 +1463,7 @@
         <div id="fInstRows" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px"></div>
         <div class="mo-acts">
           <button class="mo-cancel" onclick="feeStep(2)">← Back</button>
-          <button class="mo-save" onclick="saveFeeInstalments()">💾 Save Instalments</button>
+          <button class="mo-save" id="fInstSaveBtn" onclick="saveFeeInstalments()">💾 Save Instalments</button>
         </div>
       </div>
     </div>
