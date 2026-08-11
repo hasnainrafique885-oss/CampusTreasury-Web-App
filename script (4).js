@@ -1106,6 +1106,14 @@ function renderSettingsPage(){
   if($('st-latepct'))  $('st-latepct').value=s.lateFeePct;
   if($('st-dueday'))   $('st-dueday').value=s.feeDueDay;
   if($('st-sesstimeout')) $('st-sesstimeout').value=s.sessionTimeoutMin||15;
+  if($('st-bankName'))         $('st-bankName').value=s.bankName||'';
+  if($('st-bankBranch'))       $('st-bankBranch').value=s.bankBranch||'';
+  if($('st-bankAccountTitle')) $('st-bankAccountTitle').value=s.bankAccountTitle||'';
+  if($('st-bankAccountNo'))    $('st-bankAccountNo').value=s.bankAccountNo||'';
+  if($('st-bankIBAN'))         $('st-bankIBAN').value=s.bankIBAN||'';
+  if($('st-customerCode'))     $('st-customerCode').value=s.customerCode||'';
+  if($('st-voucherPrefix'))    $('st-voucherPrefix').value=s.voucherPrefix||'';
+  if($('st-voucherInstructions')) $('st-voucherInstructions').value=(s.voucherInstructions||[]).join('\n');
 }
 
 function saveInstitutionSettings(){
@@ -1163,6 +1171,30 @@ function saveFeeConfigSettings(){
 // record without an explicit action, so existing paid/pending amounts are safe.
 function suggestedLateFee(feeAmt){
   return Math.round((Number(feeAmt)||0) * (D.settings.lateFeePct||0) / 100);
+}
+
+// ── Bank / Online Payment details shown on every printed fee voucher ──
+function saveBankSettings(){
+  if(!requirePerm('canEdit','update bank/payment settings'))return;
+  D.settings.bankName=$('st-bankName').value.trim();
+  D.settings.bankBranch=$('st-bankBranch').value.trim();
+  D.settings.bankAccountTitle=$('st-bankAccountTitle').value.trim();
+  D.settings.bankAccountNo=$('st-bankAccountNo').value.trim();
+  D.settings.bankIBAN=$('st-bankIBAN').value.trim();
+  D.settings.customerCode=$('st-customerCode').value.trim();
+  D.settings.voucherPrefix=$('st-voucherPrefix').value.trim()||'FEE';
+  auditLog('change','Bank / online payment settings updated');
+  toast('✅ Bank details saved! Will appear on the next voucher printed.');
+}
+
+// ── Payment instructions printed at the bottom of every fee voucher ──
+function saveInstructionsSettings(){
+  if(!requirePerm('canEdit','update payment instructions'))return;
+  const lines=$('st-voucherInstructions').value.split('\n').map(l=>l.trim()).filter(l=>l);
+  if(!lines.length){toast('❌ Add at least one instruction');return;}
+  D.settings.voucherInstructions=lines;
+  auditLog('change','Voucher payment instructions updated');
+  toast('✅ Payment instructions saved! Will appear on the next voucher printed.');
 }
 
 // ── Security settings (session auto-lock timeout) ──

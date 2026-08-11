@@ -878,6 +878,24 @@
             <button class="mo-save" onclick="saveSecuritySettings()">Save Changes</button>
           </div>
           <div class="card">
+            <div class="card-h"><span class="card-t">🏦 Bank / Online Payment</span></div>
+            <p style="font-size:11px;color:var(--s4);margin:0 0 10px">These details are printed on every fee voucher (Student, College and Bank copies) so students know where to deposit fees.</p>
+            <div class="mf"><label>Bank Name</label><input id="st-bankName" placeholder="e.g. MCB Bank Ltd"></div>
+            <div class="mf"><label>Branch</label><input id="st-bankBranch" placeholder="e.g. Johar Town"></div>
+            <div class="mf"><label>Account Title</label><input id="st-bankAccountTitle" placeholder="e.g. Superior College"></div>
+            <div class="mf"><label>Account Number</label><input id="st-bankAccountNo" placeholder="e.g. 0123456789"></div>
+            <div class="mf"><label>IBAN</label><input id="st-bankIBAN" placeholder="e.g. PK00MCB0000000123456789"></div>
+            <div class="mf"><label>Customer Code (voucher prefix code)</label><input id="st-customerCode" placeholder="e.g. SC"></div>
+            <div class="mf"><label>Voucher Number Prefix</label><input id="st-voucherPrefix" placeholder="e.g. FEE"></div>
+            <button class="mo-save" onclick="saveBankSettings()">Save Changes</button>
+          </div>
+          <div class="card">
+            <div class="card-h"><span class="card-t">📋 Payment Instructions</span></div>
+            <p style="font-size:11px;color:var(--s4);margin:0 0 10px">These lines are printed as numbered instructions at the bottom of every fee voucher. One instruction per line.</p>
+            <div class="mf"><label>Instructions (one per line)</label><textarea id="st-voucherInstructions" rows="7" style="width:100%;border:1.5px solid var(--s2);border-radius:var(--rads);padding:10px 13px;font-size:13px;color:var(--s6);font-family:inherit;resize:vertical;background:#fff;outline:none"></textarea></div>
+            <button class="mo-save" onclick="saveInstructionsSettings()">Save Changes</button>
+          </div>
+          <div class="card">
             <div class="card-h"><span class="card-t">💾 Data &amp; Backup</span></div>
             <p style="font-size:11px;color:var(--s4);margin:0 0 12px">Export a backup of all system data (students, fees, salaries, settings, users) as a JSON file, or restore from a previously exported file.</p>
             <button class="mo-save" style="margin-bottom:10px" onclick="exportBackup()">⬇️ Export Backup</button>
