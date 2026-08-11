@@ -1,7 +1,7 @@
 /* ═══ BASE ═══ */
 *{box-sizing:border-box;margin:0;padding:0;}
 html{font-size:14px;}
-body{font-family:'Figtree',sans-serif;background:#eef2ef;color:#152219;min-height:100vh;-webkit-font-smoothing:antialiased;}
+body{font-family:'Plus Jakarta Sans',sans-serif;background:#eef2ef;color:#152219;min-height:100vh;-webkit-font-smoothing:antialiased;}
 :root{
   --g9:#07221a;--g8:#0c3020;--g7:#134a2a;--g6:#1a6636;--g5:#20954a;--g4:#27b85b;--g3:#45d47a;
   --g1:#c4f0d4;--g0:#edfaf3;
