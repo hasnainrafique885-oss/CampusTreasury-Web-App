@@ -2715,6 +2715,7 @@ function applyLateFee(idx){
   const lateAmt=suggestedLateFee(f.amt);
   f.amt+=lateAmt;
   f.lateFeeApplied=true;
+  f.appliedLateFeeAmt=lateAmt;
   auditLog('action','Late fee applied: '+f.student+' — Rs '+lateAmt+' ('+D.settings.lateFeePct+'% of original amount)');
   buildTx();rFees();rTx();rDash();rStudents();
   toast('✅ Late fee of Rs '+fmt(lateAmt)+' added to '+f.student+"'s fee");
@@ -4354,6 +4355,12 @@ function printVoucher(idx){
   const extraChargesTotal = voucherLateFee + voucherFines.sum;
   const grandTotal = f.amt + extraChargesTotal;
 
+  // Late fee already baked into f.amt (via Apply Late Fee) — split it back out
+  // so it still shows as its own line item on the voucher instead of being
+  // silently folded into "Tuition Fee".
+  const appliedLateFeeAmt = f.lateFeeApplied ? (f.appliedLateFeeAmt||0) : 0;
+  const baseComponentAmt = f.amt - appliedLateFeeAmt;
+
   let extraChargesRows = '';
   if(voucherLateFee>0){
     extraChargesRows += `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#b91c1c">⚠ Late Fee Penalty (${D.settings.lateFeePct}% — Overdue)</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#b91c1c;font-weight:700">${voucherLateFee.toLocaleString()}</td></tr>`;
@@ -4549,7 +4556,7 @@ function printVoucher(idx){
       <tbody>${scheduleRows}</tbody>
     </table>
     ` : `
-    <!-- FULL PAYMENT BREAKDOWN TABLE -->
+    <!-- FULL PAYMENT BREAKDOWN TABLE — tuition + late fee + fines, all in one table like a real voucher -->
     <table style="width:100%;border-collapse:collapse;margin-bottom:12px">
       <thead>
         <tr>
@@ -4558,10 +4565,13 @@ function printVoucher(idx){
         </tr>
       </thead>
       <tbody style="font-size:12px">
-        <tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#334155">🎓 ${f.category&&f.category!=='Tuition'?f.category:'Tuition Fee'}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:${ink};font-weight:600">${breakdown.tuition.toLocaleString()}</td></tr>
+        <tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#334155">🎓 ${f.category&&f.category!=='Tuition'?f.category:'Tuition Fee'}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:${ink};font-weight:600">${baseComponentAmt.toLocaleString()}</td></tr>
+        ${appliedLateFeeAmt>0?`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c">⚠ Late Fee Penalty (${D.settings.lateFeePct}% — Applied)</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#b91c1c;font-weight:700">${appliedLateFeeAmt.toLocaleString()}</td></tr>`:''}
+        ${voucherLateFee>0?`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c">⚠ Late Fee Penalty (${D.settings.lateFeePct}% — Overdue)</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#b91c1c;font-weight:700">${voucherLateFee.toLocaleString()}</td></tr>`:''}
+        ${voucherFines.list.map(fine=>`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c">🚨 Disciplinary Fine — ${fine.reason}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#b91c1c;font-weight:700">${fine.amt.toLocaleString()}</td></tr>`).join('')}
         <tr>
           <td style="padding:9px 10px;font-size:12px;font-weight:700;color:${ink};background:#f8fafc;border-radius:0 0 0 8px">TOTAL — ${f.sem||'—'}</td>
-          <td style="padding:9px 10px;font-size:13px;font-weight:800;color:${stripeClr};text-align:right;background:#f8fafc;border-radius:0 0 8px 0">${f.amt.toLocaleString()}</td>
+          <td style="padding:9px 10px;font-size:13px;font-weight:800;color:${stripeClr};text-align:right;background:#f8fafc;border-radius:0 0 8px 0">${grandTotal.toLocaleString()}</td>
         </tr>
       </tbody>
     </table>
@@ -4573,7 +4583,7 @@ function printVoucher(idx){
     </div>
     `}
 
-    ${extraChargesBlock}
+    ${isInstalment?extraChargesBlock:''}
 
     <!-- AMOUNT BOX -->
     <div style="border-radius:14px;overflow:hidden;margin-bottom:14px;background:linear-gradient(135deg,${brandDeep},${brand})">
