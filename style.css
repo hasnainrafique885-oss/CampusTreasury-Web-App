@@ -180,10 +180,10 @@ button,input,select,textarea{font-family:inherit;}
 /* THE UNIFIED STAT CARD */
 .sc{
   background:#fff;
-  border-radius:14px;
+  border-radius:16px;
   padding:20px 18px 16px;
-  border:1.5px solid var(--s2);
-  box-shadow:0 2px 8px rgba(21,34,25,.05);
+  border:1px solid var(--s2);
+  box-shadow:0 4px 16px rgba(21,34,25,.06);
   transition:transform .2s,box-shadow .2s;
   position:relative;overflow:hidden;
   /* No border-top inline overrides needed — all consistent */
@@ -191,14 +191,14 @@ button,input,select,textarea{font-family:inherit;}
 .sc::before{
   content:'';position:absolute;top:0;left:0;right:0;height:3px;
   background:linear-gradient(90deg,var(--g5),var(--g4));
-  border-radius:14px 14px 0 0;
+  border-radius:16px 16px 0 0;
 }
 /* Color variants via modifier classes */
 .sc.sc-blue::before{background:linear-gradient(90deg,var(--bl),#60a5fa);}
 .sc.sc-yellow::before{background:linear-gradient(90deg,var(--yl),#fbbf24);}
 .sc.sc-red::before{background:linear-gradient(90deg,var(--rd),#f87171);}
 .sc.sc-purple::before{background:linear-gradient(90deg,var(--pu),#a78bfa);}
-.sc:hover{transform:translateY(-3px);box-shadow:0 8px 24px rgba(21,34,25,.10);}
+.sc:hover{transform:translateY(-3px);box-shadow:0 10px 28px rgba(21,34,25,.12);}
 
 .sc-ico{
   width:40px;height:40px;border-radius:10px;
@@ -229,10 +229,10 @@ button,input,select,textarea{font-family:inherit;}
 /* ═══ MAIN CARD — unified across all modules ═══ */
 .card{
   background:#fff;
-  border-radius:14px;
+  border-radius:16px;
   padding:22px;
-  border:1.5px solid var(--s2);
-  box-shadow:0 2px 8px rgba(21,34,25,.05);
+  border:1px solid var(--s2);
+  box-shadow:0 4px 16px rgba(21,34,25,.05);
   margin-bottom:16px;
 }
 .card-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:8px;}
@@ -296,16 +296,16 @@ button,input,select,textarea{font-family:inherit;}
 .tsw::-webkit-scrollbar-thumb{background:var(--s2);border-radius:4px;}
 .dt{width:100%;border-collapse:collapse;min-width:480px;}
 .dt th{
-  font-size:10px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;
-  color:var(--s4);padding:11px 14px;text-align:left;
+  font-size:10.5px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;
+  color:var(--s4);padding:14px 16px;text-align:left;
   border-bottom:1.5px solid var(--s2);white-space:nowrap;
-  background:var(--s1);
+  background:#fff;
 }
 .dt th:first-child{border-radius:10px 0 0 0;}
 .dt th:last-child{border-radius:0 10px 0 0;}
-.dt td{padding:11px 14px;font-size:13px;border-bottom:1px solid var(--s1);vertical-align:middle;color:var(--s6);}
+.dt td{padding:14px 16px;font-size:13px;border-bottom:1px solid var(--s1);vertical-align:middle;color:var(--s6);}
 .dt tr:last-child td{border-bottom:none;}
-.dt tbody tr{transition:background .12s;}
+.dt tbody tr{transition:background .15s;}
 .dt tbody tr:hover td{background:var(--g0);}
 
 /* BADGES */
