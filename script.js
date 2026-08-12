@@ -2633,11 +2633,35 @@ function rFees(){
   const tot=paid+pend+over;
   $('f-c').textContent=fmt(paid);$('f-p').textContent=fmt(pend);$('f-o').textContent=fmt(over);
   $('f-r').textContent=(tot>0?Math.round((paid/tot)*100):0)+'%';
-  $('feeTB').innerHTML=data.map(f=>{
+
+  // ── Group instalment records into ONE row per plan (roll + instTotal) ──
+  // Previously every instalment record (2/3/4/12 of them) rendered as its
+  // own <tr>, so a single student on an instalment plan cluttered the table
+  // with N rows. Now each plan collapses into a single summary row; a
+  // "▾ N instalments" toggle expands it to show the individual instalment
+  // rows (with their normal per-row actions) directly underneath.
+  const seenPlans={};
+  const displayItems=[];
+  data.forEach(f=>{
+    if(f.isInstalment){
+      const planKey=f.roll+'|'+f.instTotal;
+      if(seenPlans[planKey])return; // already added a summary row for this plan
+      seenPlans[planKey]=true;
+      // Use the full D.fees set (not just the filtered `data`) so the plan
+      // summary always reflects ALL instalments, even if a filter (e.g.
+      // status=Paid) is currently hiding some of this plan's rows.
+      const planRows=D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal)
+        .sort((a,b)=>(a.instIdx??0)-(b.instIdx??0));
+      displayItems.push({type:'plan',roll:f.roll,instTotal:f.instTotal,rows:planRows});
+    } else {
+      displayItems.push({type:'single',f});
+    }
+  });
+
+  const renderSingleRow=(f,extraAttrs)=>{
     const idx=D.fees.findIndex(x=>x===f);
     const fStu=D.students.find(s=>s.roll===f.roll);
     const gnBadge=fStu?(fStu.gender==='Male'?'<span style="font-size:9px;background:#dbeafe;color:#1d4ed8;padding:2px 7px;border-radius:50px;font-weight:700">Boy</span>':'<span style="font-size:9px;background:#ede9fe;color:#5b21b6;padding:2px 7px;border-radius:50px;font-weight:700">Girl</span>'):'—';
-    // Instalment progress badge
     let instBadge='';
     let totalInst=0;
     if(f.isInstalment){
@@ -2648,7 +2672,6 @@ function rFees(){
       instBadge=`<span style="font-size:9px;background:#fef3cd;color:${progColor};padding:2px 7px;border-radius:50px;font-weight:700;margin-left:4px">📆 Inst ${f.instPart||''} · ${paidInst}/${totalInst} paid</span>`;
     }
 
-    // Due date display
     let dueDateDisplay='—';
     if(f.dueDate){
       const today=new Date(); today.setHours(0,0,0,0);
@@ -2665,7 +2688,7 @@ function rFees(){
       }
     }
 
-    return`<tr>
+    return`<tr${extraAttrs||''}>
       <td><code class="id-tag">${f.receipt||'-'}</code>${instBadge}</td>
       <td><strong>${f.student}</strong></td>
       <td>${f.roll}</td><td>${gnBadge}</td><td>${f.sem}</td>
@@ -2700,7 +2723,99 @@ function rFees(){
         </div>
       </td>
     </tr>`;
+  };
+
+  const renderPlanRow=(roll,instTotal,rows)=>{
+    const stu=D.students.find(s=>s.roll===roll);
+    const gnBadge=stu?(stu.gender==='Male'?'<span style="font-size:9px;background:#dbeafe;color:#1d4ed8;padding:2px 7px;border-radius:50px;font-weight:700">Boy</span>':'<span style="font-size:9px;background:#ede9fe;color:#5b21b6;padding:2px 7px;border-radius:50px;font-weight:700">Girl</span>'):'—';
+    const plan=instPlanSummary({roll,instTotal});
+    const first=rows[0]||{};
+    const nextUnpaid=rows.find(r=>feeComputeStatus(r)!=='Paid');
+    const repRow=nextUnpaid||rows[rows.length-1]; // if all paid, represent by the last one
+    const repIdx=D.fees.findIndex(x=>x===repRow);
+    const allPaid=plan.fullyPaid;
+
+    // Overall plan status: Paid only if every instalment is paid; otherwise
+    // Overdue if ANY unpaid instalment is overdue, else Pending/Partial.
+    let planStatus='Pending';
+    if(allPaid) planStatus='Paid';
+    else if(rows.some(r=>feeComputeStatus(r)==='Overdue'||feeComputeStatus(r)==='Partial-Overdue')) planStatus='Overdue';
+    else if(plan.totalPaid>0) planStatus='Partial';
+
+    let dueDateDisplay='—';
+    if(!allPaid && repRow.dueDate){
+      const today=new Date(); today.setHours(0,0,0,0);
+      const due=new Date(repRow.dueDate); due.setHours(0,0,0,0);
+      const diffDays=Math.ceil((due-today)/(1000*60*60*24));
+      if(diffDays<0){
+        dueDateDisplay=`<span style="color:var(--rd);font-weight:700;font-size:12px">⚠️ ${repRow.dueDate}<br><span style="font-size:10px">${Math.abs(diffDays)} days overdue</span></span>`;
+      } else if(diffDays<=7){
+        dueDateDisplay=`<span style="color:#d97706;font-weight:700;font-size:12px">⏰ ${repRow.dueDate}<br><span style="font-size:10px">${diffDays} days remaining</span></span>`;
+      } else {
+        dueDateDisplay=`<span style="color:var(--s5);font-size:12px">${repRow.dueDate}<br><span style="font-size:10px;color:var(--s4)">${diffDays} days remaining</span></span>`;
+      }
+    } else if(allPaid){
+      dueDateDisplay='<span style="color:var(--s4);font-size:12px">— fully paid —</span>';
+    }
+
+    const progColor=allPaid?'var(--g5)':plan.totalPaid>0?'var(--yl)':'#92400e';
+    const planId='plan-'+roll.replace(/[^a-zA-Z0-9]/g,'')+'-'+instTotal;
+
+    const summaryRow=`<tr class="fee-plan-row" data-plan="${planId}">
+      <td>
+        <button class="fee-plan-toggle" onclick="toggleFeePlanRows('${planId}')" title="Show all instalments" style="background:none;border:none;cursor:pointer;font-size:11px;color:var(--s5);margin-right:4px">▸</button>
+        <code class="id-tag">${rows.map(r=>r.receipt).join(', ')}</code>
+      </td>
+      <td><strong>${first.student}</strong></td>
+      <td>${roll}</td><td>${gnBadge}</td><td>${first.sem}</td>
+      <td><strong>Rs ${fmt(instTotal)}</strong>
+        <div style="font-size:9px;background:#fef3cd;color:${progColor};padding:2px 7px;border-radius:50px;font-weight:700;display:inline-block;margin-top:3px">📆 ${plan.paidCount}/${rows.length} instalments paid</div>
+      </td>
+      <td>${dueDateDisplay}</td>
+      <td style="font-size:12px;color:var(--s4)">—</td>
+      <td>—</td>
+      <td>${bdg(planStatus)}</td>
+      <td style="white-space:nowrap">
+        <div class="action-menu-wrap">
+          <button class="action-dots-btn" onclick="toggleActionMenu(this)" title="Actions">⋯</button>
+          <div class="action-dropdown">
+            ${!allPaid?`<button onclick="quickCollect(${repIdx});closeAllMenus()">💳 Collect Next Payment (${repRow.instPart})</button>
+                <button onclick="printVoucher(${repIdx});closeAllMenus()">🖨️ Print Next Voucher</button>`:''}
+            <hr>
+            <button onclick="printInstalmentVouchers('${roll}',${instTotal},'all');closeAllMenus()">📄 Generate All ${rows.length} Vouchers</button>
+            <button onclick="printInstalmentVouchers('${roll}',${instTotal},'paid');closeAllMenus()">✅ Generate Paid Vouchers</button>
+            <button onclick="printInstalmentVouchers('${roll}',${instTotal},'remaining');closeAllMenus()">⏳ Generate Remaining Vouchers</button>
+            <hr>
+            <button onclick="viewFee(${repIdx});closeAllMenus()">👁 View Plan Details</button>
+            <button onclick="toggleFeePlanRows('${planId}');closeAllMenus()">📋 Show Individual Instalments</button>
+          </div>
+        </div>
+      </td>
+    </tr>`;
+
+    // NOTE: feeTB is a <tbody>, so nested <tbody> wrappers aren't valid HTML
+    // (the browser would silently hoist them out and break the table). Each
+    // detail <tr> instead carries its own data-plan-details/style attributes
+    // so toggleFeePlanRows() can show/hide them as a group via querySelectorAll.
+    const detailRows=rows.map(r=>renderSingleRow(r,` class="fee-plan-detail" data-plan-details="${planId}" style="display:none;background:var(--g0)"`)).join('');
+    return summaryRow+detailRows;
+  };
+
+  $('feeTB').innerHTML=displayItems.map(item=>{
+    if(item.type==='single') return renderSingleRow(item.f);
+    return renderPlanRow(item.roll,item.instTotal,item.rows);
   }).join('');
+}
+
+// Expands/collapses the individual instalment rows nested under a grouped
+// instalment plan's summary row in the Fees table.
+function toggleFeePlanRows(planId){
+  const detailRows=document.querySelectorAll('[data-plan-details="'+planId+'"]');
+  if(!detailRows.length)return;
+  const open=detailRows[0].style.display!=='none';
+  detailRows.forEach(r=>{ r.style.display=open?'none':'table-row'; });
+  const toggleBtn=document.querySelector('[data-plan="'+planId+'"] .fee-plan-toggle');
+  if(toggleBtn) toggleBtn.textContent=open?'▸':'▾';
 }
 
 // Manually applies the configured Late Fee Penalty % to an Overdue fee record.
@@ -4475,16 +4590,38 @@ function printVoucher(idx){
   voucherFines.list.forEach(fine=>{
     extraChargesRows += `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#b91c1c">🚨 Disciplinary Fine — ${fine.reason}</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#b91c1c;font-weight:700">${fine.amt.toLocaleString()}</td></tr>`;
   });
-  const extraChargesBlock = extraChargesTotal>0 ? `
+  // (The old late-fee/fine-only "Additional Charges Due" table was replaced
+  // by instBreakdownTable below, which itemises the FULL challan — base
+  // fee, bulk/merged fees, applied late fee, suggested late fee, and
+  // disciplinary fines together — instead of only late fee + fines.)
+
+  // ── Instalment "This Challan" breakdown table ──────────────────────────
+  // The schedule table above shows the whole plan, but it never itemised
+  // WHAT makes up this specific challan's amount. baseComponentAmt already
+  // strips out mergedExtraFeesTotal and appliedLateFeeAmt from f.amt, so
+  // sum(base + merged fees + applied late fee + suggested late fee + fines)
+  // == f.amt + extraChargesTotal == grandTotal — same total as before, just
+  // no longer hidden inside one lump "Tuition Fee" number.
+  let instBreakdownRows = `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#334155">${baseLabel}${f.instPart?' — Instalment '+f.instPart:''}</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#1a3a2a">${baseComponentAmt.toLocaleString()}</td></tr>`;
+  mergedExtraFees.forEach(ex=>{
+    instBreakdownRows += `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#0e5c8c">📦 ${ex.category}</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#0e5c8c">${(ex.amt||0).toLocaleString()}</td></tr>`;
+  });
+  if(appliedLateFeeAmt>0){
+    instBreakdownRows += `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#b91c1c">⚠ Late Fee Penalty (${D.settings.lateFeePct}% — Applied)</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#b91c1c">${appliedLateFeeAmt.toLocaleString()}</td></tr>`;
+  }
+  instBreakdownRows += extraChargesRows; // suggested (not-yet-applied) late fee + disciplinary fines
+
+  const instBreakdownTable = (mergedExtraFees.length>0 || appliedLateFeeAmt>0 || extraChargesTotal>0) ? `
         <table style="width:100%;border-collapse:collapse;margin-bottom:10px;font-family:Arial,sans-serif">
           <thead>
-            <tr style="background:#fef2f2">
-              <th style="padding:6px 10px;text-align:left;font-size:8.5px;color:#b91c1c;font-weight:800;letter-spacing:1px;text-transform:uppercase;border:1px solid #fca5a5;width:60%">⚠ Additional Charges Due</th>
-              <th style="padding:6px 10px;text-align:right;font-size:8.5px;color:#b91c1c;font-weight:800;letter-spacing:1px;text-transform:uppercase;border:1px solid #fca5a5">Amount (Rs)</th>
+            <tr style="background:#f8fafc">
+              <th style="padding:6px 10px;text-align:left;font-size:8.5px;color:#475569;font-weight:800;letter-spacing:1px;text-transform:uppercase;border:1px solid #e2e8f0;width:60%">This Challan — Amount Breakdown</th>
+              <th style="padding:6px 10px;text-align:right;font-size:8.5px;color:#475569;font-weight:800;letter-spacing:1px;text-transform:uppercase;border:1px solid #e2e8f0">Amount (Rs)</th>
             </tr>
           </thead>
           <tbody style="font-family:Arial,sans-serif;font-size:11.5px">
-            ${extraChargesRows}
+            ${instBreakdownRows}
+            <tr><td style="padding:7px 10px;border:1px solid #e2e8f0;font-weight:800;color:#0d3b1e;background:#f0fdf4">TOTAL — This Challan</td><td style="padding:7px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:800;color:#0d3b1e;background:#f0fdf4">${grandTotal.toLocaleString()}</td></tr>
           </tbody>
         </table>` : '';
 
@@ -4691,7 +4828,7 @@ function printVoucher(idx){
     </div>
     `}
 
-    ${isInstalment?extraChargesBlock:''}
+    ${isInstalment?instBreakdownTable:''}
 
     <!-- AMOUNT BOX -->
     <div style="border-radius:14px;overflow:hidden;margin-bottom:14px;background:linear-gradient(135deg,${brandDeep},${brand})">
