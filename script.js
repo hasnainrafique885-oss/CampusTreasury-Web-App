@@ -3276,17 +3276,27 @@ function openBulkFee(){
   if(!requirePerm('canEdit','bulk assign fee'))return;
   const depts=[...new Set(D.students.map(s=>s.dept))].sort();
   $('bf-dept').innerHTML=depts.map(d=>`<option value="${d}">${d}</option>`).join('');
+  if($('bf-dept-campus')) $('bf-dept-campus').value='all';
   $('bf-scope').value='all';
   bulkFeeScopeChange('all');
   $('bf-cat').value='Lab Fee';
   $('bf-amt').value='1000';
   $('bf-due').value=isoDate();
+  if($('bf-separate')) $('bf-separate').checked=false;
   updateBulkFeePreview();
   showMo('bulkFee');
 }
 
+// A student's existing fee record that this bulk fee can be merged into —
+// any non-instalment record that isn't fully paid yet. Instalment plans are
+// skipped since they have their own locked per-part structure.
+function getBulkFeeMergeTarget(roll){
+  return D.fees.find(x=>x.roll===roll&&x.status!=='Paid'&&!x.isInstalment);
+}
+
 function bulkFeeScopeChange(v){
   $('bf-dept-wrap').style.display=v==='dept'?'block':'none';
+  $('bf-dept-campus-wrap').style.display=v==='dept'?'block':'none';
   $('bf-gender-wrap').style.display=v==='gender'?'block':'none';
   updateBulkFeePreview();
 }
@@ -3294,7 +3304,11 @@ function bulkFeeScopeChange(v){
 function getBulkFeeTargets(){
   const scope=$('bf-scope').value;
   let list=D.students;
-  if(scope==='dept') list=D.students.filter(s=>s.dept===$('bf-dept').value);
+  if(scope==='dept'){
+    list=D.students.filter(s=>s.dept===$('bf-dept').value);
+    const campus=$('bf-dept-campus')&&$('bf-dept-campus').value;
+    if(campus&&campus!=='all') list=list.filter(s=>s.gender===campus);
+  }
   else if(scope==='gender') list=D.students.filter(s=>s.gender===$('bf-gender').value);
   return list;
 }
@@ -3302,20 +3316,28 @@ function getBulkFeeTargets(){
 function updateBulkFeePreview(){
   const targets=getBulkFeeTargets();
   const amt=parseInt($('bf-amt').value)||0;
+  const separate=$('bf-separate')&&$('bf-separate').checked;
   const prev=$('bf-preview');
   if(!prev)return;
   if(!targets.length){
     prev.innerHTML='⚠️ No students match this scope.';
     return;
   }
-  prev.innerHTML=`This will assign the fee to <strong>${targets.length}</strong> student(s) — total <strong>Rs ${fmt(amt*targets.length)}</strong>.`;
+  let extra;
+  if(separate){
+    extra=`Each student will get their own <strong>separate voucher</strong>.`;
+  }else{
+    const willMerge=targets.filter(s=>getBulkFeeMergeTarget(s.roll)).length;
+    extra=`<strong>${willMerge}</strong> will be merged into an existing pending voucher, <strong>${targets.length-willMerge}</strong> will get a new voucher (no pending fee found).`;
+  }
+  prev.innerHTML=`This will assign the fee to <strong>${targets.length}</strong> student(s) — total <strong>Rs ${fmt(amt*targets.length)}</strong>.<br>${extra}`;
 }
 // Live-update the preview as amount/scope fields change
 document.addEventListener('input',(e)=>{
   if(e.target && (e.target.id==='bf-amt')) updateBulkFeePreview();
 });
 document.addEventListener('change',(e)=>{
-  if(e.target && (e.target.id==='bf-dept'||e.target.id==='bf-gender')) updateBulkFeePreview();
+  if(e.target && (e.target.id==='bf-dept'||e.target.id==='bf-dept-campus'||e.target.id==='bf-gender'||e.target.id==='bf-separate')) updateBulkFeePreview();
 });
 
 function confirmBulkFee(){
@@ -3327,14 +3349,38 @@ function confirmBulkFee(){
   const due=$('bf-due').value;
   if(!due){toast('❌ Due date is required');return;}
   const category=$('bf-cat').value.trim()||'Fee';
-  if(!confirm(`Assign "${category}" fee of Rs ${fmt(amt)} to ${targets.length} student(s)? This cannot be bulk-undone.`))return;
+  const separate=$('bf-separate')&&$('bf-separate').checked;
+  const confirmMsg=separate
+    ? `Assign "${category}" fee of Rs ${fmt(amt)} to ${targets.length} student(s) as a separate voucher each? This cannot be bulk-undone.`
+    : `Assign "${category}" fee of Rs ${fmt(amt)} to ${targets.length} student(s)? It will merge into each student's existing pending voucher where one exists, otherwise a new voucher will be created. This cannot be bulk-undone.`;
+  if(!confirm(confirmMsg))return;
 
   const today=new Date(); today.setHours(0,0,0,0);
   const dueDt=new Date(due); dueDt.setHours(0,0,0,0);
   const st=dueDt<today?'Overdue':'Pending';
 
-  let added=0, skipped=0;
+  let added=0, skipped=0, merged=0;
   targets.forEach(s=>{
+    // Default behaviour: fold this fee into the student's existing pending/
+    // overdue voucher instead of creating a new, separately-shown one.
+    if(!separate){
+      const existing=getBulkFeeMergeTarget(s.roll);
+      if(existing){
+        existing.amt=(existing.amt||0)+amt;
+        if(!existing.category){
+          existing.category=category;
+        }else if(!existing.category.split(' + ').map(c=>c.trim()).includes(category)){
+          existing.category=existing.category+' + '+category;
+        }
+        existing.status=feeComputeStatus(existing);
+        if(s.status!=='Paid'&&s.status!=='Overdue') s.status=existing.status;
+        merged++;
+        return;
+      }
+      // No pending voucher to merge into (fully paid or no fee record at
+      // all) — fall through and create a fresh one below.
+    }
+
     const alreadyHas=D.fees.some(x=>x.roll===s.roll&&x.category===category&&x.dueDate===due);
     if(alreadyHas){skipped++;return;}
     D.fees.push({
@@ -3346,10 +3392,14 @@ function confirmBulkFee(){
     added++;
   });
 
-  auditLog('action',`Bulk fee assigned: ${category} — Rs ${amt} to ${added} student(s)`+(skipped?` (${skipped} skipped — already had it)`:''));
+  const parts=[];
+  if(merged) parts.push(`${merged} merged into existing voucher`);
+  if(added) parts.push(`${added} new voucher${added>1?'s':''}`);
+  if(skipped) parts.push(`${skipped} skipped — already had it`);
+  auditLog('action',`Bulk fee assigned: ${category} — Rs ${amt} to ${targets.length} student(s) (${parts.join(', ')})`);
   buildTx();rFees();rStudents();rDash();
   closeMo('bulkFee');
-  toast(`✅ ${category} fee added for ${added} student(s)`+(skipped?`, ${skipped} skipped (duplicate)`:''));
+  toast(`✅ ${category} fee assigned`+(merged?`, ${merged} merged`:'')+(added?`, ${added} new`:'')+(skipped?`, ${skipped} skipped`:''));
 }
 
 function viewFee(idx){
