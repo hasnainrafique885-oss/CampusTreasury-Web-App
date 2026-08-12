@@ -3264,6 +3264,14 @@ function delTransportFee(idx){
 }
 
 
+// Strips a trailing "(Boys)" / "(Girls)" / "(Male)" / "(Female)" campus tag
+// off a department string — e.g. "ICS (Boys)" -> "ICS". Department names in
+// student records carry this suffix, but campus is already its own filter
+// in Bulk Assign Fee, so we don't want it duplicating the department list.
+function deptBaseName(dept){
+  return (dept||'').replace(/\s*\((Boys|Girls|Male|Female)\)\s*$/i,'').trim();
+}
+
 /* ══════════════════════════════════════════════════
    BULK FEE ASSIGNMENT — e.g. add a Lab Fee or Sports
    Fee for a whole department, a whole campus, or the
@@ -3274,9 +3282,14 @@ function delTransportFee(idx){
 ══════════════════════════════════════════════════ */
 function openBulkFee(){
   if(!requirePerm('canEdit','bulk assign fee'))return;
-  const depts=[...new Set(D.students.map(s=>s.dept))].sort();
+  // Student records store dept as e.g. "ICS (Boys)" / "ICS (Girls)" — strip
+  // that campus suffix so the Department dropdown shows one clean entry
+  // per department (campus is picked separately below) instead of two
+  // near-duplicate entries per department.
+  const depts=[...new Set(D.students.map(s=>deptBaseName(s.dept)))].filter(Boolean).sort();
   $('bf-dept').innerHTML=depts.map(d=>`<option value="${d}">${d}</option>`).join('');
   if($('bf-dept-campus')) $('bf-dept-campus').value='all';
+  if($('bf-year')) $('bf-year').value='all';
   $('bf-scope').value='all';
   bulkFeeScopeChange('all');
   $('bf-cat').value='Lab Fee';
@@ -3305,11 +3318,17 @@ function getBulkFeeTargets(){
   const scope=$('bf-scope').value;
   let list=D.students;
   if(scope==='dept'){
-    list=D.students.filter(s=>s.dept===$('bf-dept').value);
+    const chosen=$('bf-dept').value;
+    list=D.students.filter(s=>deptBaseName(s.dept)===chosen);
     const campus=$('bf-dept-campus')&&$('bf-dept-campus').value;
     if(campus&&campus!=='all') list=list.filter(s=>s.gender===campus);
   }
   else if(scope==='gender') list=D.students.filter(s=>s.gender===$('bf-gender').value);
+  // Year filter applies on top of whichever scope was picked above (all /
+  // department / campus) — lets a fee target only 1st Year or 2nd Year
+  // students within that scope, e.g. a fee that only 2nd Year students owe.
+  const yr=$('bf-year')&&$('bf-year').value;
+  if(yr&&yr!=='all') list=list.filter(s=>s.sem===yr);
   return list;
 }
 
@@ -3337,7 +3356,7 @@ document.addEventListener('input',(e)=>{
   if(e.target && (e.target.id==='bf-amt')) updateBulkFeePreview();
 });
 document.addEventListener('change',(e)=>{
-  if(e.target && (e.target.id==='bf-dept'||e.target.id==='bf-dept-campus'||e.target.id==='bf-gender'||e.target.id==='bf-separate')) updateBulkFeePreview();
+  if(e.target && (e.target.id==='bf-dept'||e.target.id==='bf-dept-campus'||e.target.id==='bf-year'||e.target.id==='bf-gender'||e.target.id==='bf-separate')) updateBulkFeePreview();
 });
 
 function confirmBulkFee(){
@@ -3366,6 +3385,16 @@ function confirmBulkFee(){
     if(!separate){
       const existing=getBulkFeeMergeTarget(s.roll);
       if(existing){
+        // Snapshot the original fee head once, before we start folding bulk
+        // fees in, so the voucher/breakdown can still show a clean base row
+        // (e.g. "Tuition Fee") instead of an ever-growing concatenated string.
+        if(!existing.baseCategory) existing.baseCategory=existing.category||'Tuition';
+        // Keep this bulk fee as its own line item — merging still combines
+        // it into one voucher/amount for collection purposes, but it shows
+        // up as a separate row (like Late Fee does) instead of vanishing
+        // into the tuition amount.
+        existing.extraFees=existing.extraFees||[];
+        existing.extraFees.push({category:category,amt:amt});
         existing.amt=(existing.amt||0)+amt;
         if(!existing.category){
           existing.category=category;
@@ -3421,7 +3450,21 @@ function viewFee(idx){
         ? `<div style="background:#fff1f1;border:1px solid #fca5a5;border-radius:var(--rads);padding:10px 14px;margin-top:12px;font-size:13px;color:#b91c1c">✅ Late fee already applied to this record.</div>`
         : `<div style="background:#fff1f1;border:1px solid #fca5a5;border-radius:var(--rads);padding:10px 14px;margin-top:12px;font-size:13px;color:#b91c1c">⚠️ Overdue — suggested late fee at ${D.settings.lateFeePct}% is <strong>Rs ${fmt(suggestedLateFee(f.amt))}</strong> (Settings → Fee Configuration). Not added automatically. <button class="btn btn-outline" style="margin-top:8px;font-size:11px;padding:5px 10px;color:#b91c1c;border-color:#fca5a5" onclick="applyLateFee(${idx});closeMo('viewFee')">⚠️ Apply Late Fee Now</button></div>`)
     : '';
-  $('vFeeBody').innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px;margin-bottom:12px">${[['Receipt No',`<code class="id-tag">${f.receipt||'-'}</code>`],['Student Name',`<strong>${f.student}</strong>`],['Roll Number',f.roll],['Fee Category',f.category||'Tuition'],['Gender',(stu.gender||'-')],['Department',(stu.dept||'-')],['Program',(stu.cls||'-')],['Semester',f.sem],['Amount',`<strong class="pos">Rs ${fmt(f.amt)}</strong>`],['Due Date',f.dueDate||'-'],['Payment Date',f.date&&f.date!=='-'?f.date:'-'],['Method',f.method&&f.method!=='-'?f.method:'-'],['Status',bdg(f.status)]].map(([k,v])=>`<div><div style="font-size:10px;font-weight:700;color:var(--s4);text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">${k}</div><div>${v}</div></div>`).join('')}</div>${instHtml}${lateFeeHtml}<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">${f.status==='Paid'?`<button class="mo-save" onclick="printReceipt(${idx});closeMo('viewFee')">🧾 Print Receipt</button>`:`<button class="mo-save" onclick="closeMo('viewFee');quickCollect(${idx})">💳 Collect Payment</button>`}<button class="mo-cancel" onclick="closeMo('viewFee');openEditFee(${idx})">✏️ Edit</button></div>`;
+  // Bulk-assigned fees (Lab Fee, Sports Fee, etc.) merged into this voucher —
+  // shown as their own breakdown rows instead of just an amount bump.
+  let extraFeesHtml='';
+  if(f.extraFees&&f.extraFees.length){
+    const appliedLateFeeAmt=f.lateFeeApplied?(f.appliedLateFeeAmt||0):0;
+    const extraTotal=f.extraFees.reduce((a,e)=>a+(e.amt||0),0);
+    const baseAmt=f.amt-appliedLateFeeAmt-extraTotal;
+    extraFeesHtml=`<div style="background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:12px 14px;margin-top:12px">
+      <div style="font-size:10px;font-weight:700;color:var(--g7);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">🧾 Fee Breakdown</div>
+      <div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>${(f.baseCategory&&f.baseCategory!=='Tuition')?f.baseCategory:'Tuition Fee'}</span><strong>Rs ${fmt(baseAmt)}</strong></div>
+      ${f.extraFees.map(ex=>`<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1);color:#0e5c8c"><span>📦 ${ex.category}</span><strong>Rs ${fmt(ex.amt||0)}</strong></div>`).join('')}
+      <div style="display:flex;justify-content:space-between;font-size:13px;padding:6px 0 0;font-weight:700"><span>Total</span><span>Rs ${fmt(f.amt)}</span></div>
+    </div>`;
+  }
+  $('vFeeBody').innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px;margin-bottom:12px">${[['Receipt No',`<code class="id-tag">${f.receipt||'-'}</code>`],['Student Name',`<strong>${f.student}</strong>`],['Roll Number',f.roll],['Fee Category',f.category||'Tuition'],['Gender',(stu.gender||'-')],['Department',(stu.dept||'-')],['Program',(stu.cls||'-')],['Semester',f.sem],['Amount',`<strong class="pos">Rs ${fmt(f.amt)}</strong>`],['Due Date',f.dueDate||'-'],['Payment Date',f.date&&f.date!=='-'?f.date:'-'],['Method',f.method&&f.method!=='-'?f.method:'-'],['Status',bdg(f.status)]].map(([k,v])=>`<div><div style="font-size:10px;font-weight:700;color:var(--s4);text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">${k}</div><div>${v}</div></div>`).join('')}</div>${instHtml}${extraFeesHtml}${lateFeeHtml}<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">${f.status==='Paid'?`<button class="mo-save" onclick="printReceipt(${idx});closeMo('viewFee')">🧾 Print Receipt</button>`:`<button class="mo-save" onclick="closeMo('viewFee');quickCollect(${idx})">💳 Collect Payment</button>`}<button class="mo-cancel" onclick="closeMo('viewFee');openEditFee(${idx})">✏️ Edit</button></div>`;
   showMo('viewFee');
 }
 
@@ -4409,7 +4452,21 @@ function printVoucher(idx){
   // so it still shows as its own line item on the voucher instead of being
   // silently folded into "Tuition Fee".
   const appliedLateFeeAmt = f.lateFeeApplied ? (f.appliedLateFeeAmt||0) : 0;
-  const baseComponentAmt = f.amt - appliedLateFeeAmt;
+  // Bulk-assigned fees (Lab Fee, Sports Fee, etc.) that got merged into this
+  // voucher — split those back out too, same idea as the late fee above, so
+  // each one shows as its own row instead of being hidden inside the total.
+  const mergedExtraFees = f.extraFees||[];
+  const mergedExtraFeesTotal = mergedExtraFees.reduce((a,e)=>a+(e.amt||0),0);
+  const baseComponentAmt = f.amt - appliedLateFeeAmt - mergedExtraFeesTotal;
+
+  // Label for the base row — once extraFees exist, f.category has already
+  // been overwritten with the merged/concatenated string (e.g. "Lab Fee"),
+  // so it can no longer be trusted as the base fee's name. Use the
+  // baseCategory snapshot instead in that case; only fall back to f.category
+  // when this voucher was never merged (so f.category is still original).
+  const baseLabel = mergedExtraFees.length
+    ? ((f.baseCategory&&f.baseCategory!=='Tuition')?f.baseCategory:'Tuition Fee')
+    : ((f.category&&f.category!=='Tuition')?f.category:'Tuition Fee');
 
   let extraChargesRows = '';
   if(voucherLateFee>0){
@@ -4615,7 +4672,8 @@ function printVoucher(idx){
         </tr>
       </thead>
       <tbody style="font-size:12px">
-        <tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#334155">🎓 ${f.category&&f.category!=='Tuition'?f.category:'Tuition Fee'}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:${ink};font-weight:600">${baseComponentAmt.toLocaleString()}</td></tr>
+        <tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#334155">🎓 ${baseLabel}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:${ink};font-weight:600">${baseComponentAmt.toLocaleString()}</td></tr>
+        ${mergedExtraFees.map(ex=>`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#0e5c8c">📦 ${ex.category}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#0e5c8c;font-weight:700">${(ex.amt||0).toLocaleString()}</td></tr>`).join('')}
         ${appliedLateFeeAmt>0?`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c">⚠ Late Fee Penalty (${D.settings.lateFeePct}% — Applied)</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#b91c1c;font-weight:700">${appliedLateFeeAmt.toLocaleString()}</td></tr>`:''}
         ${voucherLateFee>0?`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c">⚠ Late Fee Penalty (${D.settings.lateFeePct}% — Overdue)</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#b91c1c;font-weight:700">${voucherLateFee.toLocaleString()}</td></tr>`:''}
         ${voucherFines.list.map(fine=>`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c">🚨 Disciplinary Fine — ${fine.reason}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#b91c1c;font-weight:700">${fine.amt.toLocaleString()}</td></tr>`).join('')}
