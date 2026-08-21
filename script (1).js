@@ -2304,6 +2304,11 @@ function saveStu(){
       const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
       const baseDate=dueDt||new Date();
       const interval=getInstInterval(s.cls,instCount);
+      // Unique id per plan — NEVER group plans by roll+instTotal alone, since
+      // two plans for the same student can legitimately share the same total
+      // fee (e.g. two semesters at the same rate). planId is what makes each
+      // plan's records collapse together correctly everywhere else in the app.
+      const planId=s.roll+'-'+Date.now()+'-'+Math.floor(Math.random()*1000);
       for(let i=0;i<instCount;i++){
         feeRC++;
         const instAmt=i===instCount-1?perAmt+remainder:perAmt;
@@ -2317,6 +2322,7 @@ function saveStu(){
           status:instOverdue?'Overdue':'Pending',
           dueDate:instDueStr,
           isInstalment:true,
+          planId:planId,
           instPart:(i+1)+'/'+instCount,
           instMonth:months[instDue.getMonth()]+' '+instDue.getFullYear(),
           instTotal:feeAmt,
@@ -2644,15 +2650,14 @@ function rFees(){
   const displayItems=[];
   data.forEach(f=>{
     if(f.isInstalment){
-      const planKey=f.roll+'|'+f.instTotal;
+      const planKey=instPlanKey(f);
       if(seenPlans[planKey])return; // already added a summary row for this plan
       seenPlans[planKey]=true;
       // Use the full D.fees set (not just the filtered `data`) so the plan
       // summary always reflects ALL instalments, even if a filter (e.g.
       // status=Paid) is currently hiding some of this plan's rows.
-      const planRows=D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal)
-        .sort((a,b)=>(a.instIdx??0)-(b.instIdx??0));
-      displayItems.push({type:'plan',roll:f.roll,instTotal:f.instTotal,rows:planRows});
+      const planRows=instPlanRows(f);
+      displayItems.push({type:'plan',roll:f.roll,instTotal:f.instTotal,planId:planKey,rows:planRows});
     } else {
       displayItems.push({type:'single',f});
     }
@@ -2665,7 +2670,7 @@ function rFees(){
     let instBadge='';
     let totalInst=0;
     if(f.isInstalment){
-      const allInst=D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal);
+      const allInst=instPlanRows(f);
       const paidInst=allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
       totalInst=allInst.length||parseInt((f.instPart||'1/1').split('/')[1])||1;
       const progColor=paidInst===totalInst?'var(--g5)':paidInst>0?'var(--yl)':'#92400e';
@@ -2728,8 +2733,10 @@ function rFees(){
   const renderPlanRow=(roll,instTotal,rows)=>{
     const stu=D.students.find(s=>s.roll===roll);
     const gnBadge=stu?(stu.gender==='Male'?'<span style="font-size:9px;background:#dbeafe;color:#1d4ed8;padding:2px 7px;border-radius:50px;font-weight:700">Boy</span>':'<span style="font-size:9px;background:#ede9fe;color:#5b21b6;padding:2px 7px;border-radius:50px;font-weight:700">Girl</span>'):'—';
-    const plan=instPlanSummary({roll,instTotal});
     const first=rows[0]||{};
+    // Summarize using a real row (carries planId) so plans that share a
+    // roll+instTotal with another plan aren't merged together here.
+    const plan=instPlanSummary(first);
     const nextUnpaid=rows.find(r=>feeComputeStatus(r)!=='Paid');
     const repRow=nextUnpaid||rows[rows.length-1]; // if all paid, represent by the last one
     const repIdx=D.fees.findIndex(x=>x===repRow);
@@ -2759,7 +2766,7 @@ function rFees(){
     }
 
     const progColor=allPaid?'var(--g5)':plan.totalPaid>0?'var(--yl)':'#92400e';
-    const planId='plan-'+roll.replace(/[^a-zA-Z0-9]/g,'')+'-'+instTotal;
+    const planId='plan-'+instPlanKey(first).replace(/[^a-zA-Z0-9]/g,'');
 
     const summaryRow=`<tr class="fee-plan-row" data-plan="${planId}">
       <td>
@@ -3553,7 +3560,7 @@ function viewFee(idx){
   $('vFeeName').textContent=f.student;
   let instHtml='';
   if(f.isInstalment&&f.instTotal){
-    const allInst=D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal);
+    const allInst=instPlanRows(f);
     const paidCount=allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
     const totalCount=allInst.length;
     const paidAmt=allInst.reduce((a,b)=>a+feePaidAmt(b),0);
@@ -3763,6 +3770,8 @@ function saveFeeInstalments(){
 
   const today=new Date(); today.setHours(0,0,0,0);
   const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  // Unique id per plan — see note in the student-add instalment branch above.
+  const planId=stuRoll+'-'+Date.now()+'-'+Math.floor(Math.random()*1000);
   for(let i=0;i<count;i++){
     feeRC++;
     const dueDate=new Date(dueDates[i]);
@@ -3776,6 +3785,7 @@ function saveFeeInstalments(){
       status:isOverdue?'Overdue':'Pending',
       dueDate:dueDates[i],
       isInstalment:true,
+      planId:planId,
       instIdx:i,
       instPart:(i+1)+'/'+count,
       instMonth:monthLabel,
@@ -4306,7 +4316,7 @@ function printReceipt(idx, paymentAmount){
   let feeLabel='Tuition Fee — Full Payment', totalFeeForDoc=f.amt, paidToDate=receivedNow,
       outstanding=0, instRows='', instCount='', instPaidCount=0;
   if(isInstalment){
-    const allInst=D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal);
+    const allInst=instPlanRows(f);
     instPaidCount=allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
     instCount=allInst.length;
     paidToDate=allInst.reduce((a,b)=>a+feePaidAmt(b),0);
@@ -4627,7 +4637,7 @@ function printVoucher(idx){
 
   let allInst=[], paidCount=0, totalCount=0, paidAmt=0, remainAmt=0;
   if(isInstalment){
-    allInst    = D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal);
+    allInst    = instPlanRows(f);
     paidCount  = allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
     totalCount = allInst.length;
     paidAmt    = allInst.reduce((a,b)=>a+feePaidAmt(b),0);
@@ -8143,9 +8153,19 @@ function feeComputeStatus(f){
 function feeStatusLabel(status){
   return {Paid:'PAID',Partial:'PARTIALLY PAID','Partial-Overdue':'PARTIALLY PAID (OVERDUE)',Overdue:'OVERDUE',Pending:'UNPAID'}[status]||status.toUpperCase();
 }
-// All instalment rows belonging to the same 4-part plan as fee record `f`.
+// Groups a plan's records by planId. Falls back to roll+instTotal ONLY for
+// legacy records saved before planId existed — never use roll+instTotal for
+// new plans, since two plans for the same student can share the same total
+// fee (e.g. two semesters at the same rate) and would otherwise get merged.
+function instPlanKey(f){
+  return f.planId || (f.roll+'|'+f.instTotal);
+}
+function sameInstPlan(a,b){
+  return a.roll===b.roll && instPlanKey(a)===instPlanKey(b);
+}
+// All instalment rows belonging to the same plan as fee record `f`.
 function instPlanRows(f){
-  return D.fees.filter(x=>x.roll===f.roll&&x.isInstalment&&x.instTotal===f.instTotal)
+  return D.fees.filter(x=>x.isInstalment&&sameInstPlan(x,f))
     .sort((a,b)=>(a.instIdx??0)-(b.instIdx??0));
 }
 function instPlanSummary(f){
