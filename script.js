@@ -194,6 +194,9 @@ function activeBudget(){
 
 const $ = id => document.getElementById(id);
 const fmt = v => Number(v).toLocaleString('en-PK');
+// Escapes user-entered text before it goes into innerHTML. Staff-typed values
+// (names, reasons, notes) can legitimately contain & < > " and an apostrophe.
+const htmlEsc = v => String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Net pay helper — clamps at 0 so a deduction larger than (basic+allow) can never
 // flip the salary into a negative number (which would show as reversed/negative
 // in the Expense ledger). Excess deduction beyond gross is simply capped at gross.
@@ -252,6 +255,12 @@ function ensureTxSeq(){
     (list||[]).forEach(r=>{ if(!r)return; const n=Number(r.txSeq); if(isFinite(n)&&n>D.seq[key]) D.seq[key]=n; });
   };
   bump('fee',D.fees); bump('sal',D.salaries); bump('exp',D.expenses); bump('tftx',D.transportFees);
+  // Permanent per-record id. Payments in D.feePayments are attributed to an
+  // EXACT fee record through this, because `roll` alone is ambiguous as soon as
+  // a student has more than one fee, and array indices shift on delete.
+  if(typeof D.seq.fid!=='number'||isNaN(D.seq.fid)) D.seq.fid=0;
+  D.fees.forEach(f=>{ if(!f)return; const n=parseInt(String(f.feeId||'').replace(/^F/,''),10); if(isFinite(n)&&n>D.seq.fid) D.seq.fid=n; });
+  D.fees.forEach(f=>{ if(f) ensureFeeId(f); });
   D.fees.forEach(f=>{if(!isFinite(Number(f.txSeq)))f.txSeq=++D.seq.fee;});
   D.salaries.forEach(s=>{if(!isFinite(Number(s.txSeq)))s.txSeq=++D.seq.sal;});
   D.expenses.forEach(e=>{if(!isFinite(Number(e.txSeq)))e.txSeq=++D.seq.exp;});
@@ -279,13 +288,19 @@ function buildTx() {
     let logged=0, n=0;
     (D.feePayments||[]).forEach((p,pi)=>{
       if(!p||usedPayments.has(pi)||p.roll!==f.roll) return;
-      // Match the payment to this exact instalment row. planId is the reliable
-      // key; if EITHER side has one they must agree, so a payment logged for a
-      // new plan can never be attributed to a legacy plan that happens to share
-      // the same roll + instPart + instTotal.
-      if((p.planId||f.planId)&&p.planId!==f.planId) return;
-      if(f.isInstalment){ if(p.instPart!==f.instPart||p.instTotal!==f.instTotal) return; }
-      else if(p.instPart) return;
+      // feeId is the exact key: a student can have several fees, and array
+      // indices shift on delete, so roll alone is not enough. Older log entries
+      // predate feeId, hence the planId / instPart fallbacks below.
+      if(p.feeId&&f.feeId){ if(p.feeId!==f.feeId) return; }
+      else {
+        // Match the payment to this exact instalment row. planId is the
+        // reliable key; if EITHER side has one they must agree, so a payment
+        // logged for a new plan can never be attributed to a legacy plan that
+        // happens to share the same roll + instPart + instTotal.
+        if((p.planId||f.planId)&&p.planId!==f.planId) return;
+        if(f.isInstalment){ if(p.instPart!==f.instPart||p.instTotal!==f.instTotal) return; }
+        else if(p.instPart) return;
+      }
       const amt=Number(p.amount)||0;
       if(amt<=0||logged+amt>paid) return; // never log more than was received
       usedPayments.add(pi); logged+=amt; n++;
@@ -313,20 +328,21 @@ function autoCheckOverdue() {
   let changed = 0;
 
   D.fees.forEach(f => {
-    // Only check Pending fees — skip Paid and already Overdue
-    if (f.status !== 'Pending') return;
     if (!f.dueDate) return;
+    // Recompute from money received: a Pending record becomes Overdue, and a
+    // Partial one becomes Partial-Overdue (it used to be skipped entirely, so a
+    // part-paid fee never showed up as overdue anywhere).
+    const derived = feeComputeStatus(f);
+    if (derived === 'Paid' || f.status === derived) return;
+    if (derived !== 'Overdue' && derived !== 'Partial-Overdue') return;
 
-    const due = parseDate(f.dueDate);
-    due.setHours(0,0,0,0);
-
-    if (due < today) {
-      f.status = 'Overdue';
-      // Also update the student's status
-      const stu = D.students.find(s => s.roll === f.roll);
-      if (stu && stu.status !== 'Paid') stu.status = 'Overdue';
-      changed++;
-    }
+    f.status = derived;
+    // Keep the cached student status in step, but derive it from all of that
+    // student's records — writing a flat 'Overdue' used to stick even after the
+    // rest of their fees were cleared.
+    const stu = D.students.find(s => s.roll === f.roll);
+    if (stu) stu.status = studentFeeStatus(stu);
+    changed++;
   });
 
   let tfChanged = 0;
@@ -1403,9 +1419,11 @@ document.addEventListener('click',function(e){
 const EXPORT_CFG = {
   students:{
     title:'Student List',
-    headers:['Student ID','Name','Father Name','Roll No','Gender','Department','Class','Section','Semester','Fee (Rs)','Status','Contact','Address'],
-    rows:()=>D.students.map(s=>[s.id||'',s.name,s.father||'',s.roll,s.gender||'',s.dept,s.cls||'',s.section||'',s.sem,s.fee,s.status,s.contact||'',s.address||'']),
-    colWidths:[15,22,22,15,10,22,10,8,8,12,10,15,25]
+    headers:['Student ID','Name','Father Name','Roll No','Gender','Department','Class','Section','Semester','Fee (Rs)','Scholarship','Outstanding (Rs)','Status','Contact','Address'],
+    // Status and outstanding are derived from the fee + transport records; the
+    // cached s.status can never say "Partial" and drifts between saves.
+    rows:()=>D.students.map(s=>[s.id||'',s.name,s.father||'',s.roll,s.gender||'',s.dept,s.cls||'',s.section||'',s.sem,s.fee,studentScholarshipLabel(s)||'-',studentOutstanding(s),studentFeeStatus(s),s.contact||'',s.address||'']),
+    colWidths:[15,22,22,15,10,22,10,8,8,12,20,16,10,15,25]
   },
   employees:{
     title:'Employee List',
@@ -1415,9 +1433,9 @@ const EXPORT_CFG = {
   },
   fees:{
     title:'Fee Records',
-    headers:['Receipt','Student','Roll No','Category','Semester','Amount (Rs)','Date','Method','Status'],
-    rows:()=>D.fees.map(f=>[f.receipt||'',f.student,f.roll,f.category||'Tuition',f.sem,f.amt,f.date,f.method,f.status]),
-    colWidths:[14,24,14,12,10,14,14,16,10]
+    headers:['Receipt','Student','Roll No','Category','Semester','Gross (Rs)','Scholarship (Rs)','Concession (Rs)','Payable (Rs)','Paid (Rs)','Balance (Rs)','Due Date','Date','Method','Status','Relief Details'],
+    rows:()=>D.fees.map(f=>[f.receipt||'',f.student,f.roll,f.category||'Tuition',f.sem,feeGrossAmt(f),feeScholarshipAmt(f),feeConcessionAmt(f),f.amt,feePaidAmt(f),feeRemainingAmt(f),f.dueDate||'',f.date,f.method,feeStatusLabel(feeComputeStatus(f)),feeDiscountSummary(f)]),
+    colWidths:[14,24,14,12,10,13,15,15,13,13,13,12,12,14,16,34]
   },
   salaries:{
     title:'Salary Records',
@@ -1969,6 +1987,7 @@ function openAddStu(){
   if($('s-finst-wrap')) $('s-finst-wrap').style.display='none';
   if($('s-finst-count')) $('s-finst-count').value='2';
   if($('s-fee-preview')) $('s-fee-preview').style.display='none';
+  setStuScholarshipFields(null);
   stuFeePreview();
   clearStuErr();
   showMo('addStu');
@@ -1993,17 +2012,22 @@ function openEditStu(idx){
   },10);
   $('ssm').value=s.sem||'1st Year';
   // Fee plan fields - show existing due date if any
-  const existFee=D.fees.find(f=>f.roll===s.roll&&f.status!=='Paid');
+  const existFee=D.fees.find(f=>f.roll===s.roll&&feeRemainingAmt(f)>0);
   if($('s-fdue')) $('s-fdue').value=existFee&&existFee.dueDate?existFee.dueDate:'';
   if($('s-ftype')) $('s-ftype').value='full';
   if($('s-finst-wrap')) $('s-finst-wrap').style.display='none';
+  if($('s-fee-preview')) $('s-fee-preview').style.display='none';
+  // setStuScholarshipFields() ends with stuFeePreview(), which would re-open the
+  // preview box, so hide it again afterwards: on Edit the fee record already
+  // exists and previewing a plan that will not be created is misleading.
+  setStuScholarshipFields(s);
   if($('s-fee-preview')) $('s-fee-preview').style.display='none';
   clearStuErr();
   showMo('addStu');
 }
 
 function clearStuErr(){
-  ['sn','sfn','sr','sfa'].forEach(id=>{
+  ['sn','sfn','sr','sfa','s-schval'].forEach(id=>{
     const el=$(id);if(el)el.classList.remove('err');
     const em=$('em-'+id);if(em)em.remove();
   });
@@ -2021,7 +2045,7 @@ function rStudents(){
   const data=D.students.filter(s=>{
     const q=SF.q;
     return(!q||s.name.toLowerCase().includes(q)||(s.id||'').toLowerCase().includes(q)||s.roll.toLowerCase().includes(q)||(s.father||'').toLowerCase().includes(q))
-      &&(!SF.st||s.status===SF.st)
+      &&(!SF.st||studentFeeStatus(s)===SF.st)
       &&(!SF.sec||s.section===SF.sec)
       &&(!SF.cls||s.cls===SF.cls)
       &&(!SF.gn||s.gender===SF.gn);
@@ -2036,12 +2060,15 @@ function rStudents(){
   // already received, and status==='Overdue' alone would double-count the
   // paid portion of a partially-paid-but-overdue instalment as still owed.
   const paidAmt=D.fees.reduce((a,b)=>a+feePaidAmt(b),0)+D.transportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
-  const pendingAmt=D.fees.filter(f=>f.status==='Pending'||f.status==='Partial').reduce((a,b)=>a+feeRemainingAmt(b),0)+D.transportFees.filter(t=>t.status==='Pending').reduce((a,b)=>a+b.amt,0);
-  const overdueAmt=D.fees.filter(f=>f.status==='Overdue'||f.status==='Partial-Overdue').reduce((a,b)=>a+feeRemainingAmt(b),0)+D.transportFees.filter(t=>t.status==='Overdue').reduce((a,b)=>a+b.amt,0);
+  const pendingAmt=D.fees.filter(f=>{const s=feeComputeStatus(f);return s==='Pending'||s==='Partial';}).reduce((a,b)=>a+feeRemainingAmt(b),0)+D.transportFees.filter(t=>t.status==='Pending').reduce((a,b)=>a+b.amt,0);
+  const overdueAmt=D.fees.filter(f=>feeComputeStatus(f).indexOf('Overdue')>=0).reduce((a,b)=>a+feeRemainingAmt(b),0)+D.transportFees.filter(t=>t.status==='Overdue').reduce((a,b)=>a+b.amt,0);
   const unpaidAmt=pendingAmt+overdueAmt;
-  const overdueCount=D.students.filter(s=>s.status==='Overdue').length;
-  const pendingCount=D.students.filter(s=>s.status==='Pending').length;
-  const paidStuCount=D.students.filter(s=>s.status==='Paid').length;
+  // Head-counts come from studentFeeStatus() (derived from the fee + transport
+  // records) rather than the cached s.status, which only gets rewritten when a
+  // fee is saved and so went stale after part-payments or transport-only debt.
+  const overdueCount=D.students.filter(s=>studentFeeStatus(s)==='Overdue').length;
+  const pendingCount=D.students.filter(s=>studentFeeStatus(s)==='Pending').length;
+  const paidStuCount=D.students.filter(s=>studentFeeStatus(s)==='Paid').length;
   $('s-tot').textContent=D.students.length;
   if($('s-boys'))  $('s-boys').textContent=boysCount;
   if($('s-girls')) $('s-girls').textContent=girlsCount;
@@ -2072,7 +2099,7 @@ function rStudents(){
       <td style="font-size:12px">${s.dept}</td>
       <td>${s.sem}</td>
       <td>${s.contact||'-'}</td>
-      <td>${bdg(s.status)}</td>
+      <td>${bdg(studentFeeStatus(s))}${studentOutstanding(s)>0?`<div style="font-size:10px;color:var(--rd);margin-top:3px;font-weight:700">Rs ${fmt(studentOutstanding(s))} due</div>`:''}</td>
       <td><strong>Rs ${fmt(s.fee)}</strong></td>
       <td style="white-space:nowrap">
         <div class="action-menu-wrap">
@@ -2295,14 +2322,19 @@ function delStu(i){
 
 function viewStu(idx){
   const s=D.students[idx];
+  const vsOwed=studentOutstanding(s);
+  const vsSch=studentScholarshipLabel(s);
   $('vStuName').textContent=s.name;
   $('vStuBody').innerHTML=`
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px;margin-bottom:14px">
-      ${[['Student ID',`<code class="id-tag">${s.id||'-'}</code>`],['Full Name',`<strong>${s.name}</strong>`],['Father Name',s.father||'-'],['Roll Number',`<strong>${s.roll}</strong>`],['Gender',s.gender==='Male'?'<span style="background:#dbeafe;color:#1d4ed8;padding:2px 9px;border-radius:50px;font-size:11px;font-weight:700">Male (Boy)</span>':'<span style="background:#ede9fe;color:#5b21b6;padding:2px 9px;border-radius:50px;font-size:11px;font-weight:700">Female (Girl)</span>'],['Department',s.dept],['Program / Section',`${(s.cls||'-').replace('Inter-','')} / ${s.section||'-'}`],['Year / Semester',s.sem],['Contact',s.contact||'-'],['Fee Amount',`<strong class="pos">Rs ${fmt(s.fee)}</strong>`],['Fee Status',bdg(s.status)]].map(([k,v])=>`<div><div style="font-size:10px;font-weight:700;color:var(--s4);text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">${k}</div><div>${v}</div></div>`).join('')}
+      ${[['Student ID',`<code class="id-tag">${s.id||'-'}</code>`],['Full Name',`<strong>${s.name}</strong>`],['Father Name',s.father||'-'],['Roll Number',`<strong>${s.roll}</strong>`],['Gender',s.gender==='Male'?'<span style="background:#dbeafe;color:#1d4ed8;padding:2px 9px;border-radius:50px;font-size:11px;font-weight:700">Male (Boy)</span>':'<span style="background:#ede9fe;color:#5b21b6;padding:2px 9px;border-radius:50px;font-size:11px;font-weight:700">Female (Girl)</span>'],['Department',s.dept],['Program / Section',`${(s.cls||'-').replace('Inter-','')} / ${s.section||'-'}`],['Year / Semester',s.sem],['Contact',s.contact||'-'],['Fee Amount',`<strong class="pos">Rs ${fmt(s.fee)}</strong>`],['Scholarship',vsSch?`<span style="background:#eef2ff;color:#4338ca;padding:2px 9px;border-radius:50px;font-size:11px;font-weight:700">🎓 ${htmlEsc(vsSch)}</span>`:'<span style="color:var(--s4)">None</span>'],['Fee Status',bdg(studentFeeStatus(s))],['Outstanding',vsOwed>0?`<strong class="neg">Rs ${fmt(vsOwed)}</strong>`:'<span class="pos">Rs 0 — all clear</span>']].map(([k,v])=>`<div><div style="font-size:10px;font-weight:700;color:var(--s4);text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">${k}</div><div>${v}</div></div>`).join('')}
     </div>
     <div style="background:var(--s1);border-radius:var(--rads);padding:12px">
       <div style="font-size:10px;font-weight:700;color:var(--s4);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Home Address</div>
       <div style="font-size:13px">${s.address||'-'}</div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap">
+      <button class="mo-cancel" onclick="closeMo('viewStu');openFeeLedger('${htmlEsc(s.roll)}')">📜 Fee Ledger</button>
     </div>`;
   showMo('viewStu');
 }
@@ -2326,6 +2358,13 @@ function saveStu(){
       setFieldErr('sr',`Roll No "${rollVal}" already used by ${D.students[dup].name}`);
       hasErr=true;
     }
+  }
+  // Scholarship: a type without a value is meaningless, and a percentage above
+  // 100 would produce a negative fee.
+  const schForm=stuFormScholarship();
+  if(schForm.schType!=='None'){
+    if(!(schForm.schVal>0)) {setFieldErr('s-schval','Enter the relief amount for this scholarship');hasErr=true;}
+    else if(schForm.schMode==='percent'&&schForm.schVal>100) {setFieldErr('s-schval','A percentage relief cannot be more than 100%');hasErr=true;}
   }
   if(hasErr)return;
 
@@ -2356,6 +2395,11 @@ function saveStu(){
     gender:gender,
     dept:deptVal,cls:clsCode,section:($('ssec')||{}).value||'A',sem:($('ssm')||{}).value||'1st Year',
     fee:feeAmt,status:autoStatus,
+    // Standing scholarship. `fee` stays the FULL (gross) charge for the class —
+    // the relief is applied when a fee is raised, so changing the scholarship
+    // later never silently rewrites fees that were already issued.
+    schType:schForm.schType,schMode:schForm.schMode,
+    schVal:schForm.schType==='None'?0:schForm.schVal,schNote:schForm.schNote,
   };
 
   if(isEdit){
@@ -2367,9 +2411,15 @@ function saveStu(){
     auditLog('action','Student added: '+s.name+' ('+s.id+')');
 
     if(feeType==='instalment'){
-      // Create instalment fee records with level-aware intervals
-      const perAmt=Math.floor(feeAmt/instCount);
-      const remainder=feeAmt-(perAmt*instCount);
+      // Create instalment fee records with level-aware intervals.
+      // The gross fee is split first and the scholarship is then applied to each
+      // part, so every record is internally consistent (amt = gross − relief)
+      // and instTotal is the NET amount the student actually owes.
+      const perGross=Math.floor(feeAmt/instCount);
+      const grossRem=feeAmt-(perGross*instCount);
+      const parts=[];
+      for(let i=0;i<instCount;i++) parts.push(buildFeeDiscount(s,i===instCount-1?perGross+grossRem:perGross,0,''));
+      const netTotal=parts.reduce((t,p)=>t+p.amt,0);
       const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
       const baseDate=dueDt||new Date();
       const interval=getInstInterval(s.cls,instCount);
@@ -2380,13 +2430,15 @@ function saveStu(){
       const planId=s.roll+'-'+Date.now()+'-'+Math.floor(Math.random()*1000);
       for(let i=0;i<instCount;i++){
         feeRC++;
-        const instAmt=i===instCount-1?perAmt+remainder:perAmt;
+        const part=parts[i];
         const instDue=addMonths(baseDate, i*interval);
         const instDueStr=ymd(instDue);
         const instOverdue=instDue<today;
         D.fees.push({
           student:s.name,roll:s.roll,sem:s.sem,
-          amt:instAmt,paidAmt:0,date:'-',method:'-',
+          grossAmt:part.grossAmt,scholarshipAmt:part.scholarshipAmt,scholarshipLabel:part.scholarshipLabel,
+          concessionAmt:0,discountReason:'',
+          amt:part.amt,paidAmt:0,date:'-',method:'-',
           receipt:'INST-'+feeRC,
           status:instOverdue?'Overdue':'Pending',
           dueDate:instDueStr,
@@ -2395,31 +2447,40 @@ function saveStu(){
           instIdx:i,
           instPart:(i+1)+'/'+instCount,
           instMonth:months[instDue.getMonth()]+' '+instDue.getFullYear(),
-          instTotal:feeAmt,
+          instTotal:netTotal,
           instInterval:interval,
           category:feeCat
         });
       }
-      toast('✅ Student added with '+instCount+' instalment plan (every '+interval+' month(s))! ID: '+s.id);
+      toast('✅ Student added with '+instCount+' instalment plan (every '+interval+' month(s))'+(feeAmt>netTotal?', scholarship applied — Rs '+netTotal.toLocaleString()+' payable':'')+'! ID: '+s.id);
     } else {
-      // Single fee record
+      // Single fee record — the standing scholarship comes off the top, so `amt`
+      // is always the NET payable figure the rest of the app relies on.
+      const disc=buildFeeDiscount(s,feeAmt,0,'');
       D.fees.push({
         student:s.name,roll:s.roll,sem:s.sem,
-        amt:feeAmt,date:'-',method:'-',
+        grossAmt:disc.grossAmt,scholarshipAmt:disc.scholarshipAmt,scholarshipLabel:disc.scholarshipLabel,
+        concessionAmt:0,discountReason:'',
+        amt:disc.amt,paidAmt:0,date:'-',method:'-',
         receipt:'FEE-'+(++feeRC),
         status:autoStatus,
         dueDate:dueDate||'',
         category:feeCat
       });
-      toast('Student added! ID: '+s.id+(isOverdue?' ⚠️ Fee is Overdue':''));
+      toast('Student added! ID: '+s.id+(disc.scholarshipAmt>0?' 🎓 '+disc.scholarshipLabel+' → Rs '+disc.amt.toLocaleString()+' payable':'')+(isOverdue?' ⚠️ Fee is Overdue':''));
     }
   }
   buildTx();rStudents();rFees();rTx();rDash();closeMo('addStu');
 }
 
 function printStudents(){
-  const rows=D.students.map(s=>[s.id||'-',s.name,s.father||'-',s.roll,s.dept,(s.cls||'-')+'/'+(s.section||'-'),s.sem,'Rs '+s.fee.toLocaleString(),s.status,s.contact||'-']);
-  const thead='<th>ID</th><th>Name</th><th>Father</th><th>Roll</th><th>Dept</th><th>Class/Sec</th><th>Sem</th><th>Fee</th><th>Status</th><th>Contact</th>';
+  // Status and balance are derived from the fee records, not the cached
+  // s.status — that field can never say "Partial" and goes stale between saves.
+  const rows=D.students.map(s=>{
+    const owed=studentOutstanding(s);
+    return [s.id||'-',s.name,s.father||'-',s.roll,s.dept,(s.cls||'-')+'/'+(s.section||'-'),s.sem,'Rs '+(Number(s.fee)||0).toLocaleString(),feeStatusLabel(studentFeeStatus(s)),owed>0?'Rs '+owed.toLocaleString():'-',s.contact||'-'];
+  });
+  const thead='<th>ID</th><th>Name</th><th>Father</th><th>Roll</th><th>Dept</th><th>Class/Sec</th><th>Sem</th><th>Fee</th><th>Status</th><th>Balance</th><th>Contact</th>';
   const body=rows.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join('');
   const h='<html><head><meta charset="UTF-8"><style>*{box-sizing:border-box;}body{font-family:Arial,sans-serif;padding:22px;}h2{color:#1a6636;font-size:18px;margin-bottom:6px;}.inf{font-size:12px;color:#666;margin-bottom:12px;}table{width:100%;border-collapse:collapse;}th{background:#1a6636;color:#fff;padding:7px 9px;text-align:left;font-size:11px;}td{padding:7px 9px;border-bottom:1px solid #e0e0e0;font-size:12px;}tr:nth-child(even)td{background:#f5faf6;}@media print{.np{display:none;}}</style></head><body><h2>'+D.settings.instName+' - Student List</h2><div class="inf">Generated: '+new Date().toLocaleString()+' | Total: '+D.students.length+'</div><table><thead><tr>'+thead+'</tr></thead><tbody>'+body+'</tbody></table><div class="np" style="margin-top:12px"><button onclick="window.print()" style="padding:7px 16px;background:#1a6636;color:#fff;border:none;border-radius:6px;cursor:pointer;">Print</button></div></body></html>';
   showPrintPreview(h,'Student List');
@@ -2756,17 +2817,26 @@ function rFees(){
   const data=D.fees.filter(f=>{
     const stu=D.students.find(s=>s.roll===f.roll);
     return(!FF.q||f.student.toLowerCase().includes(FF.q)||f.roll.toLowerCase().includes(FF.q)||(f.receipt||'').toLowerCase().includes(FF.q))
-      &&(!FF.st||f.status===FF.st)
+      // Status is matched on the DERIVED status (money received vs payable), so
+      // Partial / Partial-Overdue are selectable and a stale stored status can
+      // never hide a record from its own filter. "_unpaid" is the clerk's
+      // catch-all: anything still carrying a balance.
+      &&(!FF.st||(FF.st==='_unpaid'?feeRemainingAmt(f)>0:feeComputeStatus(f)===FF.st))
       &&(!FF.mt||f.method===FF.mt)
       &&(!FF.gn||!stu||(stu.gender||'')=== FF.gn)
       &&(!FF.cls||!stu||stu.cls===FF.cls)
       &&(!FF.sec||!stu||stu.section===FF.sec);
   });
   const paid=D.fees.reduce((a,b)=>a+feePaidAmt(b),0);
-  const pend=D.fees.filter(f=>f.status==='Pending'||f.status==='Partial').reduce((a,b)=>a+feeRemainingAmt(b),0);
-  const over=D.fees.filter(f=>f.status==='Overdue'||f.status==='Partial-Overdue').reduce((a,b)=>a+feeRemainingAmt(b),0);
+  const pend=D.fees.filter(f=>{const s=feeComputeStatus(f);return s==='Pending'||s==='Partial';}).reduce((a,b)=>a+feeRemainingAmt(b),0);
+  const over=D.fees.filter(f=>feeComputeStatus(f).indexOf('Overdue')>=0).reduce((a,b)=>a+feeRemainingAmt(b),0);
+  // Part-paid = records that hold money but aren't settled. This is the figure
+  // the office chases day to day, so it gets its own card (click = filter).
+  const partRows=D.fees.filter(f=>feeComputeStatus(f).indexOf('Partial')===0);
+  const partBal=partRows.reduce((a,b)=>a+feeRemainingAmt(b),0);
   const tot=paid+pend+over;
   $('f-c').textContent=fmt(paid);$('f-p').textContent=fmt(pend);$('f-o').textContent=fmt(over);
+  if($('f-pp')) $('f-pp').textContent=fmt(partBal)+(partRows.length?' ('+partRows.length+')':'');
   $('f-r').textContent=(tot>0?Math.round((paid/tot)*100):0)+'%';
 
   // ── Group instalment records into ONE row per plan (roll + instTotal) ──
@@ -2795,6 +2865,10 @@ function rFees(){
   const renderSingleRow=(f,extraAttrs)=>{
     const idx=D.fees.findIndex(x=>x===f);
     const fStu=D.students.find(s=>s.roll===f.roll);
+    // Derived status + money figures — the row must agree with what has actually
+    // been received, not with a status string written at some point in the past.
+    const st=feeComputeStatus(f);
+    const pd=feePaidAmt(f), rem=feeRemainingAmt(f), dsc=feeDiscountAmt(f);
     const gnBadge=fStu?(fStu.gender==='Male'?'<span style="font-size:9px;background:#dbeafe;color:#1d4ed8;padding:2px 7px;border-radius:50px;font-weight:700">Boy</span>':'<span style="font-size:9px;background:#ede9fe;color:#5b21b6;padding:2px 7px;border-radius:50px;font-weight:700">Girl</span>'):'—';
     let instBadge='';
     let totalInst=0;
@@ -2811,7 +2885,7 @@ function rFees(){
       const today=new Date(); today.setHours(0,0,0,0);
       const due=parseDate(f.dueDate); due.setHours(0,0,0,0);
       const diffDays=Math.ceil((due-today)/(1000*60*60*24));
-      if(f.status==='Paid'){
+      if(st==='Paid'){
         dueDateDisplay=`<span style="color:var(--s4);font-size:12px">${f.dueDate}</span>`;
       } else if(diffDays<0){
         dueDateDisplay=`<span style="color:var(--rd);font-weight:700;font-size:12px">⚠️ ${f.dueDate}<br><span style="font-size:10px">${Math.abs(diffDays)} days overdue</span></span>`;
@@ -2826,27 +2900,31 @@ function rFees(){
       <td><code class="id-tag">${f.receipt||'-'}</code>${instBadge}</td>
       <td><strong>${f.student}</strong></td>
       <td>${f.roll}</td><td>${gnBadge}</td><td>${f.sem}</td>
-      <td><strong>Rs ${fmt(f.amt)}</strong></td>
+      <td><strong>Rs ${fmt(f.amt)}</strong>${dsc>0?`<div style="font-size:9.5px;color:var(--g5);font-weight:700;margin-top:2px" title="${htmlEsc(feeDiscountSummary(f))}">🎓 Rs ${fmt(dsc)} relief</div>`:''}</td>
+      <td>${pd>0?`<span style="color:var(--g5);font-weight:700">Rs ${fmt(pd)}</span>`:'<span style="color:var(--s4)">—</span>'}</td>
+      <td>${rem>0?`<span style="color:${st.indexOf('Overdue')>=0?'var(--rd)':'#d97706'};font-weight:700">Rs ${fmt(rem)}</span>`:'<span style="color:var(--s4)">—</span>'}</td>
       <td>${dueDateDisplay}</td>
       <td style="font-size:12px;color:var(--s4)">${f.date!=='-'?f.date:'—'}</td>
       <td>${f.method!=='-'?f.method:'—'}</td>
-      <td>${bdg(f.status)}</td>
+      <td>${bdg(st)}</td>
       <td style="white-space:nowrap">
         <div class="action-menu-wrap">
           <button class="action-dots-btn" onclick="toggleActionMenu(this)" title="Actions">⋯</button>
           <div class="action-dropdown">
-            ${f.status==='Paid'
+            ${st==='Paid'
               ?`<button onclick="printReceipt(${idx});closeAllMenus()">🧾 Print Receipt</button>`
-              :`<button onclick="quickCollect(${idx});closeAllMenus()">💳 Collect Payment</button>
-                <button onclick="printVoucher(${idx});closeAllMenus()">🖨️ Print Fee Voucher</button>`
+              :`<button onclick="quickCollect(${idx});closeAllMenus()">💳 Collect ${pd>0?'Balance':'Payment'}</button>
+                <button onclick="printVoucher(${idx});closeAllMenus()">🖨️ Print Fee Voucher</button>
+                ${pd>0?`<button onclick="printReceipt(${idx});closeAllMenus()">🧾 Print Receipt (paid so far)</button>`:''}`
             }
+            ${pd>0?`<button onclick="openFeeLedger('${htmlEsc(f.roll)}');closeAllMenus()">📜 Payment History</button>`:''}
             ${f.isInstalment?`
                 <hr>
-                <button onclick="printInstalmentVouchers('${f.roll}',${f.instTotal},'all');closeAllMenus()">📄 Generate All ${totalInst} Vouchers</button>
-                <button onclick="printInstalmentVouchers('${f.roll}',${f.instTotal},'paid');closeAllMenus()">✅ Generate Paid Vouchers</button>
-                <button onclick="printInstalmentVouchers('${f.roll}',${f.instTotal},'remaining');closeAllMenus()">⏳ Generate Remaining Vouchers</button>
+                <button onclick="printInstalmentVouchers('${f.roll}','${instPlanKey(f)}','all');closeAllMenus()">📄 Generate All ${totalInst} Vouchers</button>
+                <button onclick="printInstalmentVouchers('${f.roll}','${instPlanKey(f)}','paid');closeAllMenus()">✅ Generate Paid Vouchers</button>
+                <button onclick="printInstalmentVouchers('${f.roll}','${instPlanKey(f)}','remaining');closeAllMenus()">⏳ Generate Remaining Vouchers</button>
             `:''}
-            ${f.status==='Overdue'&&!f.lateFeeApplied
+            ${st.indexOf('Overdue')>=0&&!f.lateFeeApplied
               ?`<button onclick="applyLateFee(${idx});closeAllMenus()">⚠️ Apply Late Fee</button>`
               :''}
             <button onclick="viewFee(${idx});closeAllMenus()">👁 View Details</button>
@@ -2875,8 +2953,9 @@ function rFees(){
     // Overdue if ANY unpaid instalment is overdue, else Pending/Partial.
     let planStatus='Pending';
     if(allPaid) planStatus='Paid';
-    else if(rows.some(r=>feeComputeStatus(r)==='Overdue'||feeComputeStatus(r)==='Partial-Overdue')) planStatus='Overdue';
+    else if(rows.some(r=>feeComputeStatus(r).indexOf('Overdue')>=0)) planStatus='Overdue';
     else if(plan.totalPaid>0) planStatus='Partial';
+    const planDisc=rows.reduce((s,r)=>s+feeDiscountAmt(r),0);
 
     let dueDateDisplay='—';
     if(!allPaid && repRow.dueDate){
@@ -2904,9 +2983,12 @@ function rFees(){
       </td>
       <td><strong>${first.student}</strong></td>
       <td>${roll}</td><td>${gnBadge}</td><td>${first.sem}</td>
-      <td><strong>Rs ${fmt(instTotal)}</strong>
+      <td><strong>Rs ${fmt(plan.totalFee)}</strong>
+        ${planDisc>0?`<div style="font-size:9.5px;color:var(--g5);font-weight:700;margin-top:2px">🎓 Rs ${fmt(planDisc)} relief</div>`:''}
         <div style="font-size:9px;background:#fef3cd;color:${progColor};padding:2px 7px;border-radius:50px;font-weight:700;display:inline-block;margin-top:3px">📆 ${plan.paidCount}/${rows.length} instalments paid</div>
       </td>
+      <td>${plan.totalPaid>0?`<span style="color:var(--g5);font-weight:700">Rs ${fmt(plan.totalPaid)}</span>`:'<span style="color:var(--s4)">—</span>'}</td>
+      <td>${plan.totalRemaining>0?`<span style="color:${planStatus==='Overdue'?'var(--rd)':'#d97706'};font-weight:700">Rs ${fmt(plan.totalRemaining)}</span>`:'<span style="color:var(--s4)">—</span>'}</td>
       <td>${dueDateDisplay}</td>
       <td style="font-size:12px;color:var(--s4)">—</td>
       <td>—</td>
@@ -2917,10 +2999,11 @@ function rFees(){
           <div class="action-dropdown">
             ${!allPaid?`<button onclick="quickCollect(${repIdx});closeAllMenus()">💳 Collect Next Payment (${repRow.instPart})</button>
                 <button onclick="printVoucher(${repIdx});closeAllMenus()">🖨️ Print Next Voucher</button>`:''}
+            ${plan.totalPaid>0?`<button onclick="openFeeLedger('${htmlEsc(roll)}');closeAllMenus()">📜 Payment History</button>`:''}
             <hr>
-            <button onclick="printInstalmentVouchers('${roll}',${instTotal},'all');closeAllMenus()">📄 Generate All ${rows.length} Vouchers</button>
-            <button onclick="printInstalmentVouchers('${roll}',${instTotal},'paid');closeAllMenus()">✅ Generate Paid Vouchers</button>
-            <button onclick="printInstalmentVouchers('${roll}',${instTotal},'remaining');closeAllMenus()">⏳ Generate Remaining Vouchers</button>
+            <button onclick="printInstalmentVouchers('${roll}','${instPlanKey(repRow)}','all');closeAllMenus()">📄 Generate All ${rows.length} Vouchers</button>
+            <button onclick="printInstalmentVouchers('${roll}','${instPlanKey(repRow)}','paid');closeAllMenus()">✅ Generate Paid Vouchers</button>
+            <button onclick="printInstalmentVouchers('${roll}','${instPlanKey(repRow)}','remaining');closeAllMenus()">⏳ Generate Remaining Vouchers</button>
             <hr>
             <button onclick="viewFee(${repIdx});closeAllMenus()">👁 View Plan Details</button>
             <button onclick="toggleFeePlanRows('${planId}');closeAllMenus()">📋 Show Individual Instalments</button>
@@ -2961,18 +3044,35 @@ function toggleFeePlanRows(planId){
 function applyLateFee(idx){
   if(!requirePerm('canEdit','apply late fee'))return;
   const f=D.fees[idx];
-  if(!f||f.status!=='Overdue'){toast('❌ Late fee can only be applied to Overdue records');return;}
+  const st=f?feeComputeStatus(f):'';
+  if(!f||st.indexOf('Overdue')<0){toast('❌ Late fee can only be applied to Overdue records');return;}
   if(f.lateFeeApplied){toast('⚠️ Late fee already applied to this record');return;}
-  const lateAmt=suggestedLateFee(f.amt);
+  // The penalty is charged on what is still OUTSTANDING, not on the original
+  // amount — a student who has already paid most of the fee should not be
+  // penalised as if they had paid nothing.
+  const base=feeRemainingAmt(f)||f.amt;
+  const lateAmt=suggestedLateFee(base);
+  const gross0=feeGrossAmt(f); // read before amt changes (gross falls back to amt)
   f.amt+=lateAmt;
+  f.grossAmt=gross0+lateAmt;   // a penalty is never discounted
   f.lateFeeApplied=true;
   f.appliedLateFeeAmt=lateAmt;
-  auditLog('action','Late fee applied: '+f.student+' — Rs '+lateAmt+' ('+D.settings.lateFeePct+'% of original amount)');
+  f.status=feeComputeStatus(f); // a part-paid record stays Partial-Overdue
+  auditLog('action','Late fee applied: '+f.student+' — Rs '+lateAmt+' ('+D.settings.lateFeePct+'% of Rs '+fmt(base)+' outstanding)');
   buildTx();rFees();rTx();rDash();rStudents();
   toast('✅ Late fee of Rs '+fmt(lateAmt)+' added to '+f.student+"'s fee");
 }
 function fF(v){FF.q=v.toLowerCase();rFees();}
 function fFSt(v){FF.st=v;rFees();}
+// The "Part-Paid" KPI card doubles as a shortcut to the list the office chases
+// daily. Clicking it again clears the filter.
+function fFStPartial(){
+  const sel=$('fee-filter-status');
+  const next=(FF.st==='Partial')?'':'Partial';
+  if(sel) sel.value=next;
+  fFSt(next);
+  if(next) toast('Showing partially paid fees only — click the card again to clear');
+}
 function fFMt(v){FF.mt=v;rFees();}
 function fFGn(v){FF.gn=v;rFees();}
 function fFCls(v){FF.cls=v;rFees();}
@@ -3010,11 +3110,24 @@ function delFee(i){
   linkedTx.forEach(t=>auditLog('action','Transaction voided: '+t.id+' (Rs '+fmt(t.amt)+') — removed as linked fee record was deleted'));
   toast('Fee record deleted');
 }
+// The Fees page "📨 Reminders" button used to fake it with a toast. The Dashboard
+// already owns the real WhatsApp/SMS module, so hand over to it with every
+// defaulter pre-ticked rather than duplicating the messaging code here.
 function sendReminders(){
-  const rolls=new Set();
-  D.fees.filter(f=>f.status!=='Paid').forEach(f=>rolls.add(f.roll));
-  D.transportFees.filter(t=>t.status!=='Paid').forEach(t=>rolls.add(t.roll));
-  toast(`Reminders sent to ${rolls.size} students`);
+  const list=feeDefaulters();
+  if(!list.length){ toast('✅ Nobody has an outstanding balance — no reminders needed'); return; }
+  _remState.filter='both';
+  _remState.selected=new Set(list.map(s=>s.roll));
+  const navEl=document.querySelector('.ni[onclick*="dashboard"]');
+  goTo('dashboard',navEl);
+  const panel=$('db-reminder-panel');
+  if(panel) setTimeout(()=>{ try{ panel.scrollIntoView({behavior:'smooth',block:'start'}); }catch(e){ panel.scrollIntoView(); } },120);
+  const sel=$('rem-filter-status'); if(sel) sel.value='both';
+  buildReminderTable();
+  const noPhone=list.filter(s=>(s.contact||'').replace(/\D/g,'').length<7).length;
+  const owed=list.reduce((a,s)=>a+getStudentDueFee(s),0);
+  toast('📲 '+list.length+' defaulter'+(list.length!==1?'s':'')+' pre-selected — Rs '+fmt(owed)+' outstanding'
+    +(noPhone?' · ⚠️ '+noPhone+' without a contact number':'')+'. Pick a template, then WhatsApp or SMS.');
 }
 
 /* ══════════════════════════════════════════════════
@@ -3199,17 +3312,25 @@ function syncFeeForFine(fine){
   let linkedFee=D.fees.find(x=>x.linkedFineId===fine.fineId);
   if(linkedFee){
     linkedFee.amt=fine.amt;
-    if(linkedFee.status!=='Paid'){
+    linkedFee.grossAmt=fine.amt; // fines carry no relief, so gross === net
+    if(feeComputeStatus(linkedFee)!=='Paid'){
+      linkedFee.paidAmt=fine.amt;
       linkedFee.status='Paid';
       linkedFee.date=todayStr();
       linkedFee.method=linkedFee.method&&linkedFee.method!=='-'?linkedFee.method:'Cash';
       linkedFee.receipt=linkedFee.receipt&&linkedFee.receipt!=='-'?linkedFee.receipt:'FIN-RCPT-'+(++feeRC);
+    }else if(feePaidAmt(linkedFee)!==fine.amt){
+      // The fine's amount was edited after collection — keep the receipt honest
+      // by matching what is now billed rather than leaving a stale part-payment.
+      linkedFee.paidAmt=fine.amt;
     }
   } else {
     feeRC++;
     D.fees.push({
       student:fine.student,roll:fine.roll,sem:(D.students.find(s=>s.roll===fine.roll)||{}).sem||'',
-      amt:fine.amt,date:todayStr(),method:'Cash',receipt:'FIN-RCPT-'+feeRC,
+      // A disciplinary fine is never discounted — no scholarship applies here.
+      grossAmt:fine.amt,scholarshipAmt:0,scholarshipLabel:'',concessionAmt:0,discountReason:'',
+      amt:fine.amt,paidAmt:fine.amt,date:todayStr(),method:'Cash',receipt:'FIN-RCPT-'+feeRC,
       status:'Paid',dueDate:fine.date,category:'Fine',linkedFineId:fine.fineId
     });
   }
@@ -3224,7 +3345,7 @@ function syncFineFromFee(feeRecord){
   if(!feeRecord||!feeRecord.linkedFineId)return;
   const fine=D.fines.find(x=>x.fineId===feeRecord.linkedFineId);
   if(!fine)return;
-  if(feeRecord.status==='Paid'&&fine.status!=='Paid'){
+  if(feeComputeStatus(feeRecord)==='Paid'&&fine.status!=='Paid'){
     fine.status='Paid';
     auditLog('action','Fine auto-marked Paid via fee collection: '+fine.student+' — '+fine.reason);
   }
@@ -3278,9 +3399,9 @@ function delFine(idx){
   const f=D.fines[idx];
   if(!f)return;
   if(!confirm('Delete this fine for '+f.student+'?'))return;
-  // Remove the linked fee-dues record too, but only if it hasn't been
-  // collected yet — a Paid record stays as the payment's audit trail.
-  const linkedIdx=D.fees.findIndex(x=>x.linkedFineId===f.fineId&&x.status!=='Paid');
+  // Remove the linked fee-dues record too, but only if NO money has been
+  // collected against it — once any payment exists the row is the audit trail.
+  const linkedIdx=D.fees.findIndex(x=>x.linkedFineId===f.fineId&&feePaidAmt(x)===0);
   if(linkedIdx>=0) D.fees.splice(linkedIdx,1);
   D.fines.splice(idx,1);
   auditLog('action','Fine deleted: '+f.student+' — '+f.reason);
@@ -3549,15 +3670,18 @@ function openBulkFee(){
   $('bf-amt').value='1000';
   $('bf-due').value=isoDate();
   if($('bf-separate')) $('bf-separate').checked=false;
+  if($('bf-sch')) $('bf-sch').checked=false;
   updateBulkFeePreview();
   showMo('bulkFee');
 }
 
-// A student's existing fee record that this bulk fee can be merged into —
-// any non-instalment record that isn't fully paid yet. Instalment plans are
-// skipped since they have their own locked per-part structure.
+// A student's existing fee record that this bulk fee can be merged into — any
+// non-instalment record that has not been collected against yet. Instalment
+// plans are skipped since they have their own locked per-part structure, and so
+// are part-paid records: the student already paid against a printed voucher, so
+// quietly adding a new charge to it would make that receipt wrong.
 function getBulkFeeMergeTarget(roll){
-  return D.fees.find(x=>x.roll===roll&&x.status!=='Paid'&&!x.isInstalment);
+  return D.fees.find(x=>x.roll===roll&&!x.isInstalment&&feePaidAmt(x)===0&&feeComputeStatus(x)!=='Paid');
 }
 
 function bulkFeeScopeChange(v){
@@ -3585,6 +3709,16 @@ function getBulkFeeTargets(){
   return list;
 }
 
+// The discount to stamp on ONE student's share of a bulk fee. A standing
+// scholarship is opt-in here (#bf-sch): a bulk fee is usually an extra charge
+// (lab / sports / exam), and silently granting a fixed-amount scholarship again
+// on every extra would wipe those charges out.
+function bulkFeeDiscountFor(stu,amt){
+  const applySch=$('bf-sch')&&$('bf-sch').checked;
+  if(applySch) return buildFeeDiscount(stu,amt,0,'');
+  return {grossAmt:amt,scholarshipAmt:0,scholarshipLabel:'',concessionAmt:0,discountReason:'',amt:amt};
+}
+
 function updateBulkFeePreview(){
   const targets=getBulkFeeTargets();
   const amt=parseInt($('bf-amt').value)||0;
@@ -3602,14 +3736,24 @@ function updateBulkFeePreview(){
     const willMerge=targets.filter(s=>getBulkFeeMergeTarget(s.roll)).length;
     extra=`<strong>${willMerge}</strong> will be merged into an existing pending voucher, <strong>${targets.length-willMerge}</strong> will get a new voucher (no pending fee found).`;
   }
-  prev.innerHTML=`This will assign the fee to <strong>${targets.length}</strong> student(s) — total <strong>Rs ${fmt(amt*targets.length)}</strong>.<br>${extra}`;
+  // Relief has to be counted per student, since each scholarship differs.
+  let net=0, relief=0, reliefCount=0;
+  targets.forEach(s=>{
+    const d=bulkFeeDiscountFor(s,amt);
+    net+=d.amt;
+    if(d.scholarshipAmt>0){relief+=d.scholarshipAmt;reliefCount++;}
+  });
+  const reliefLine=relief>0
+    ? `<br><span style="color:var(--ok,#0a7)">Scholarship relief of <strong>Rs ${fmt(relief)}</strong> applies to ${reliefCount} student(s) — billed total <strong>Rs ${fmt(net)}</strong> instead of Rs ${fmt(amt*targets.length)}.</span>`
+    : '';
+  prev.innerHTML=`This will assign the fee to <strong>${targets.length}</strong> student(s) — total <strong>Rs ${fmt(amt*targets.length)}</strong>.<br>${extra}${reliefLine}`;
 }
 // Live-update the preview as amount/scope fields change
 document.addEventListener('input',(e)=>{
   if(e.target && (e.target.id==='bf-amt')) updateBulkFeePreview();
 });
 document.addEventListener('change',(e)=>{
-  if(e.target && (e.target.id==='bf-dept'||e.target.id==='bf-dept-campus'||e.target.id==='bf-year'||e.target.id==='bf-gender'||e.target.id==='bf-separate')) updateBulkFeePreview();
+  if(e.target && (e.target.id==='bf-dept'||e.target.id==='bf-dept-campus'||e.target.id==='bf-year'||e.target.id==='bf-gender'||e.target.id==='bf-separate'||e.target.id==='bf-sch')) updateBulkFeePreview();
 });
 
 function confirmBulkFee(){
@@ -3631,8 +3775,11 @@ function confirmBulkFee(){
   const dueDt=parseDate(due); dueDt.setHours(0,0,0,0);
   const st=dueDt<today?'Overdue':'Pending';
 
-  let added=0, skipped=0, merged=0;
+  let added=0, skipped=0, merged=0, reliefTotal=0;
   targets.forEach(s=>{
+    // Each student's own relief on their share of this fee.
+    const d=bulkFeeDiscountFor(s,amt);
+    reliefTotal+=d.scholarshipAmt;
     // Default behaviour: fold this fee into the student's existing pending/
     // overdue voucher instead of creating a new, separately-shown one.
     if(!separate){
@@ -3647,8 +3794,14 @@ function confirmBulkFee(){
         // up as a separate row (like Late Fee does) instead of vanishing
         // into the tuition amount.
         existing.extraFees=existing.extraFees||[];
-        existing.extraFees.push({category:category,amt:amt});
-        existing.amt=(existing.amt||0)+amt;
+        existing.extraFees.push({category:category,amt:d.amt,grossAmt:d.grossAmt,scholarshipAmt:d.scholarshipAmt});
+        // Read the gross/relief BEFORE touching `amt` — feeGrossAmt() falls back
+        // to amt+relief on legacy records that have no grossAmt yet.
+        const gross0=feeGrossAmt(existing), sch0=feeScholarshipAmt(existing);
+        existing.grossAmt=gross0+d.grossAmt;
+        existing.scholarshipAmt=sch0+d.scholarshipAmt;
+        if(d.scholarshipAmt>0&&!existing.scholarshipLabel) existing.scholarshipLabel=d.scholarshipLabel;
+        existing.amt=(existing.amt||0)+d.amt;
         if(!existing.category){
           existing.category=category;
         }else if(!existing.category.split(' + ').map(c=>c.trim()).includes(category)){
@@ -3667,7 +3820,9 @@ function confirmBulkFee(){
     if(alreadyHas){skipped++;return;}
     D.fees.push({
       student:s.name,roll:s.roll,sem:s.sem,
-      amt:amt,date:'-',method:'-',receipt:'-',
+      grossAmt:d.grossAmt,scholarshipAmt:d.scholarshipAmt,scholarshipLabel:d.scholarshipLabel,
+      concessionAmt:0,discountReason:'',
+      amt:d.amt,paidAmt:0,date:'-',method:'-',receipt:'-',
       status:st,dueDate:due,category:category
     });
     if(s.status!=='Paid'&&s.status!=='Overdue') s.status=st;
@@ -3678,10 +3833,190 @@ function confirmBulkFee(){
   if(merged) parts.push(`${merged} merged into existing voucher`);
   if(added) parts.push(`${added} new voucher${added>1?'s':''}`);
   if(skipped) parts.push(`${skipped} skipped — already had it`);
+  if(reliefTotal) parts.push(`Rs ${reliefTotal} scholarship relief applied`);
   auditLog('action',`Bulk fee assigned: ${category} — Rs ${amt} to ${targets.length} student(s) (${parts.join(', ')})`);
   buildTx();rFees();rStudents();rDash();
   closeMo('bulkFee');
-  toast(`✅ ${category} fee assigned`+(merged?`, ${merged} merged`:'')+(added?`, ${added} new`:'')+(skipped?`, ${skipped} skipped`:''));
+  toast(`✅ ${category} fee assigned`+(merged?`, ${merged} merged`:'')+(added?`, ${added} new`:'')+(skipped?`, ${skipped} skipped`:'')+(reliefTotal?`, Rs ${fmt(reliefTotal)} relief`:''));
+}
+
+/* ══════════════════════════════════════════════════
+   PAYMENT HISTORY  (D.feePayments was recorded but never shown)
+   One renderer feeds three places: the View Fee modal, the per-student Fee
+   Ledger modal, and the printable ledger — so they can never disagree.
+══════════════════════════════════════════════════ */
+// Every logged payment that belongs to one fee record. Matching is by the
+// permanent feeId; records saved before feeId existed fall back to the strongest
+// identity they carry (plan part, then receipt/voucher reference).
+function feePaymentsFor(f){
+  if(!f||!Array.isArray(D.feePayments)) return [];
+  const fid=f.feeId; // read-only view: never mint an id here
+  return D.feePayments.filter(p=>{
+    if(!p) return false;
+    if(fid&&p.feeId) return p.feeId===fid;
+    if(p.roll!==f.roll) return false;
+    if(f.isInstalment) return (p.planId&&f.planId)?(p.planId===f.planId&&p.instPart===f.instPart):(p.instPart===f.instPart);
+    return (p.reference&&p.reference===f.receipt)||(p.voucherRef&&p.voucherRef===f.receipt);
+  }).slice().sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')));
+}
+function feePaymentsForRoll(roll){
+  return (D.feePayments||[]).filter(p=>p&&p.roll===roll)
+    .slice().sort((a,b)=>String(a.date||'').localeCompare(String(b.date||'')));
+}
+/* Walks the money actually RECEIVED against one fee record and hands each chunk
+   to cb(amount, dateStr). Cash belongs to the month it came IN, not the month the
+   record happened to be raised, so every monthly/period bucket in the app goes
+   through here instead of dropping the cumulative feePaidAmt(f) onto f.date —
+   that used to shove a fee part-paid in July and cleared in August entirely into
+   August. Two invariants this helper guarantees and the old inline copies didn't:
+     • the total handed out never exceeds feePaidAmt(f). A legacy payment with no
+       feeId can match more than one plan row via feePaymentsFor()'s fallback
+       branch, which otherwise counted the same cash twice and made the monthly
+       rows add up to more than the report's own "Total Collected".
+     • nothing is silently dropped. A payment whose date won't parse stays in the
+       budget so the f.date fallback still accounts for it.                      */
+function feePaidByReceipt(f, cb){
+  let room=feePaidAmt(f);
+  if(room<=0) return;
+  feePaymentsFor(f).forEach(p=>{
+    if(room<=0) return;
+    const amt=Number(p.amount)||0;
+    if(amt<=0) return;
+    if(!txParseDate(p.date)) return; // undated — leave it to the fallback below
+    const use=Math.min(amt,room);
+    room-=use;
+    cb(use,p.date);
+  });
+  if(room>0&&f.date&&f.date!=='-') cb(room,f.date);
+}
+// `print:true` swaps the CSS variables for plain colours so the same markup
+// survives being dropped into a print window with no stylesheet.
+function feePaymentHistoryHtml(list,opts){
+  opts=opts||{};
+  const p=!!opts.print;
+  const cLine=p?'#e2e8e4':'var(--g1)';
+  const cMute=p?'#64748b':'var(--s4)';
+  const cGood=p?'#15803d':'var(--g7)';
+  const cHead=p?'#f5faf6':(opts.bg||'var(--g0)');
+  if(!list.length){
+    return `<div style="font-size:12.5px;color:${cMute};padding:8px 0">No payment has been logged against this record yet.</div>`;
+  }
+  const rows=list.map((x,i)=>{
+    const ref=x.reference||x.voucherRef||'-';
+    const part=x.instPart?` · Inst ${htmlEsc(x.instPart)}`:'';
+    return `<tr>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12px;color:${cMute}">${i+1}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12.5px">${htmlEsc(x.date||'-')}${part}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12.5px;text-align:right;font-weight:700;color:${cGood}">Rs ${fmt(Number(x.amount)||0)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12.5px">${htmlEsc(x.method||'-')}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12px"><code>${htmlEsc(ref)}</code></td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12px;color:${cMute}">${htmlEsc(x.receivedBy||'-')}</td>
+    </tr>`;
+  }).join('');
+  const total=list.reduce((a,b)=>a+(Number(b.amount)||0),0);
+  return `<div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr style="background:${cHead}">
+        ${['#','Date','Amount','Method','Receipt / Ref','Received By'].map((h,i)=>`<th style="padding:6px 8px;text-align:${i===2?'right':'left'};font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:${cMute};border-bottom:1px solid ${cLine}">${h}</th>`).join('')}
+      </tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr>
+        <td colspan="2" style="padding:7px 8px;font-size:12.5px;font-weight:700">Total received${list.length>1?` (${list.length} payments)`:''}</td>
+        <td style="padding:7px 8px;text-align:right;font-size:13px;font-weight:800;color:${cGood}">Rs ${fmt(total)}</td>
+        <td colspan="3"></td>
+      </tr></tfoot>
+    </table>
+  </div>`;
+}
+
+// Everything a student has ever been billed and everything they have ever paid.
+function feeLedgerData(roll){
+  const fees=D.fees.filter(f=>f.roll===roll);
+  const payments=feePaymentsForRoll(roll);
+  const billed=fees.reduce((a,b)=>a+(Number(b.amt)||0),0);
+  const relief=fees.reduce((a,b)=>a+feeDiscountAmt(b),0);
+  const paid=fees.reduce((a,b)=>a+feePaidAmt(b),0);
+  const logged=payments.reduce((a,b)=>a+(Number(b.amount)||0),0);
+  return {fees,payments,billed,relief,paid,logged,balance:Math.max(0,billed-paid)};
+}
+
+function feeLedgerHtml(roll,opts){
+  opts=opts||{};
+  const p=!!opts.print;
+  const cLine=p?'#e2e8e4':'var(--g1)';
+  const cMute=p?'#64748b':'var(--s4)';
+  const cGood=p?'#15803d':'var(--g7)';
+  const cWarn=p?'#b45309':'#d97706';
+  const d=feeLedgerData(roll);
+  const stu=D.students.find(s=>s.roll===roll)||{};
+  if(!d.fees.length&&!d.payments.length){
+    return `<div style="font-size:13px;color:${cMute}">No fee record exists for this student yet.</div>`;
+  }
+  const card=(lbl,val,col)=>`<div style="border:1px solid ${cLine};border-radius:10px;padding:9px 12px">
+    <div style="font-size:9.5px;text-transform:uppercase;letter-spacing:.9px;color:${cMute};font-weight:700">${lbl}</div>
+    <div style="font-size:15px;font-weight:800;margin-top:3px;color:${col||'inherit'}">${val}</div></div>`;
+  const summary=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:14px">
+    ${card('Billed (net)','Rs '+fmt(d.billed))}
+    ${card('Relief given','Rs '+fmt(d.relief),cGood)}
+    ${card('Received','Rs '+fmt(d.paid),cGood)}
+    ${card('Balance','Rs '+fmt(d.balance),d.balance>0?cWarn:cGood)}
+  </div>`;
+  // Per-fee position, so the office can see WHICH voucher the balance sits on.
+  const feeRows=d.fees.map(f=>{
+    const st=feeComputeStatus(f);
+    const dsc=feeDiscountAmt(f);
+    return `<tr>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12px"><code>${htmlEsc(f.receipt||'-')}</code>${f.instPart?`<div style="font-size:10px;color:${cMute}">Inst ${htmlEsc(f.instPart)}</div>`:''}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12.5px">${htmlEsc(f.category||'Tuition')}${dsc>0?`<div style="font-size:10px;color:${cGood}">${htmlEsc(feeDiscountSummary(f))}</div>`:''}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12.5px">${htmlEsc(f.dueDate||'-')}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12.5px;text-align:right">Rs ${fmt(Number(f.amt)||0)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12.5px;text-align:right;color:${cGood}">${feePaidAmt(f)>0?'Rs '+fmt(feePaidAmt(f)):'—'}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:12.5px;text-align:right;color:${feeRemainingAmt(f)>0?cWarn:cMute};font-weight:${feeRemainingAmt(f)>0?'700':'400'}">${feeRemainingAmt(f)>0?'Rs '+fmt(feeRemainingAmt(f)):'—'}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid ${cLine};font-size:11.5px">${p?feeStatusLabel(st):bdg(st)}</td>
+    </tr>`;
+  }).join('');
+  const feeTable=`<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:${cMute};margin:4px 0 6px">🧾 Fees Billed</div>
+  <div style="overflow-x:auto;margin-bottom:16px"><table style="width:100%;border-collapse:collapse">
+    <thead><tr style="background:${p?'#f5faf6':'var(--g0)'}">
+      ${['Receipt','Head','Due','Payable','Paid','Balance','Status'].map((h,i)=>`<th style="padding:6px 8px;text-align:${i>=3&&i<=5?'right':'left'};font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:${cMute};border-bottom:1px solid ${cLine}">${h}</th>`).join('')}
+    </tr></thead><tbody>${feeRows}</tbody></table></div>`;
+  // A logged total that doesn't match the recorded paidAmt means the two were
+  // edited apart at some point — say so rather than quietly showing two figures.
+  const mismatch=(d.logged!==d.paid)
+    ? `<div style="font-size:11.5px;color:${cWarn};margin-bottom:10px">⚠️ Payments logged here total Rs ${fmt(d.logged)}, while the fee records show Rs ${fmt(d.paid)} received. Older payments recorded before the payment log existed are not itemised.</div>`
+    : '';
+  return `<div style="font-size:12.5px;color:${cMute};margin-bottom:12px">
+      <strong style="color:${p?'#0f172a':'var(--s7)'};font-size:14px">${htmlEsc(stu.name||(d.fees[0]&&d.fees[0].student)||roll)}</strong>
+      · Roll ${htmlEsc(roll)}${stu.cls?' · '+htmlEsc(stu.cls):''}${stu.sem?' · Semester '+htmlEsc(stu.sem):''}
+      ${studentScholarship(stu)?`<div style="color:${cGood};margin-top:3px">🎓 Standing scholarship: ${htmlEsc(studentScholarshipLabel(stu))}</div>`:''}
+    </div>
+    ${summary}${feeTable}
+    <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:${cMute};margin:4px 0 6px">📜 Payments Received</div>
+    ${mismatch}
+    ${feePaymentHistoryHtml(d.payments,{print:p})}`;
+}
+
+function openFeeLedger(roll){
+  const stu=D.students.find(s=>s.roll===roll)||{};
+  const nameEl=$('vLedgerName'); if(nameEl) nameEl.textContent=stu.name||roll;
+  const body=$('vLedgerBody'); if(body) body.innerHTML=feeLedgerHtml(roll,{});
+  const btn=$('vLedgerPrint'); if(btn) btn.onclick=()=>printFeeLedger(roll);
+  showMo('feeLedger');
+}
+
+function printFeeLedger(roll){
+  const stu=D.students.find(s=>s.roll===roll)||{};
+  const h='<html><head><meta charset="UTF-8"><title>Fee Ledger</title></head>'
+    +'<body style="font-family:Arial,Helvetica,sans-serif;padding:24px;color:#0f172a;max-width:820px;margin:0 auto">'
+    +'<div style="text-align:center;border-bottom:3px solid #1a6636;padding-bottom:10px;margin-bottom:16px">'
+    +'<div style="font-size:19px;font-weight:800;color:#1a6636">'+htmlEsc(D.settings.instName||'')+'</div>'
+    +'<div style="font-size:11.5px;color:#64748b;margin-top:3px">'+htmlEsc(D.settings.city||'')+' · Fee Office</div>'
+    +'<div style="font-size:12.5px;font-weight:700;margin-top:6px">STUDENT FEE LEDGER</div></div>'
+    +feeLedgerHtml(roll,{print:true})
+    +'<div style="text-align:center;font-size:10.5px;color:#94a3b8;margin-top:18px">Generated '+new Date().toLocaleString()+'</div>'
+    +'<div class="np" style="margin-top:14px;text-align:center"><button onclick="window.print()" style="padding:7px 16px;background:#1a6636;color:#fff;border:none;border-radius:6px;cursor:pointer">Print</button></div>'
+    +'<style>@media print{.np{display:none}}</style></body></html>';
+  showPrintPreview(h,'Fee Ledger — '+(stu.name||roll));
 }
 
 function viewFee(idx){
@@ -3690,34 +4025,78 @@ function viewFee(idx){
   const stu=D.students.find(s=>s.roll===f.roll)||{};
   $('vFeeName').textContent=f.student;
   let instHtml='';
-  if(f.isInstalment&&f.instTotal){
-    const allInst=instPlanRows(f);
-    const paidCount=allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
-    const totalCount=allInst.length;
-    const paidAmt=allInst.reduce((a,b)=>a+feePaidAmt(b),0);
-    const pct=Math.round((paidAmt/f.instTotal)*100);
-    instHtml=`<div style="background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:12px 14px;margin-top:12px"><div style="font-size:10px;font-weight:700;color:var(--g7);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">📆 Instalment Plan</div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>This Instalment</span><strong>${f.instPart||''}</strong></div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>Paid</span><strong style="color:var(--g7)">${paidCount} of ${totalCount}</strong></div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>Total Fee</span><span>Rs ${f.instTotal.toLocaleString()}</span></div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span>Paid So Far</span><strong style="color:var(--g7)">Rs ${paidAmt.toLocaleString()}</strong></div><div style="background:var(--s2);height:6px;border-radius:50px;margin-top:8px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--g5);border-radius:50px"></div></div></div>`;
+  if(f.isInstalment){
+    const plan=instPlanSummary(f);
+    const pct=plan.totalFee>0?Math.round((plan.totalPaid/plan.totalFee)*100):0;
+    instHtml=`<div style="background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:12px 14px;margin-top:12px"><div style="font-size:10px;font-weight:700;color:var(--g7);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">📆 Instalment Plan</div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>This Instalment</span><strong>${f.instPart||''}</strong></div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>Instalments Paid</span><strong style="color:var(--g7)">${plan.paidCount} of ${plan.rows.length}</strong></div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>Plan Total</span><span>Rs ${fmt(plan.totalFee)}</span></div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>Paid So Far</span><strong style="color:var(--g7)">Rs ${fmt(plan.totalPaid)}</strong></div><div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0"><span>Plan Balance</span><strong style="color:${plan.totalRemaining>0?'#d97706':'var(--g7)'}">Rs ${fmt(plan.totalRemaining)}</strong></div><div style="background:var(--s2);height:6px;border-radius:50px;margin-top:8px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--g5);border-radius:50px"></div></div></div>`;
   }
-  const lateFeeHtml = f.status==='Overdue'
+  const lateFeeHtml = feeComputeStatus(f).indexOf('Overdue')>=0
     ? (f.lateFeeApplied
         ? `<div style="background:#fff1f1;border:1px solid #fca5a5;border-radius:var(--rads);padding:10px 14px;margin-top:12px;font-size:13px;color:#b91c1c">✅ Late fee already applied to this record.</div>`
-        : `<div style="background:#fff1f1;border:1px solid #fca5a5;border-radius:var(--rads);padding:10px 14px;margin-top:12px;font-size:13px;color:#b91c1c">⚠️ Overdue — suggested late fee at ${D.settings.lateFeePct}% is <strong>Rs ${fmt(suggestedLateFee(f.amt))}</strong> (Settings → Fee Configuration). Not added automatically. <button class="btn btn-outline" style="margin-top:8px;font-size:11px;padding:5px 10px;color:#b91c1c;border-color:#fca5a5" onclick="applyLateFee(${idx});closeMo('viewFee')">⚠️ Apply Late Fee Now</button></div>`)
+        : `<div style="background:#fff1f1;border:1px solid #fca5a5;border-radius:var(--rads);padding:10px 14px;margin-top:12px;font-size:13px;color:#b91c1c">⚠️ Overdue — suggested late fee at ${D.settings.lateFeePct}% of the Rs ${fmt(feeRemainingAmt(f))} still outstanding is <strong>Rs ${fmt(suggestedLateFee(feeRemainingAmt(f)||f.amt))}</strong> (Settings → Fee Configuration). Not added automatically. <button class="btn btn-outline" style="margin-top:8px;font-size:11px;padding:5px 10px;color:#b91c1c;border-color:#fca5a5" onclick="applyLateFee(${idx});closeMo('viewFee')">⚠️ Apply Late Fee Now</button></div>`)
+    : '';
+  // Relief actually granted on this record (snapshotted at billing time, so
+  // editing the student's scholarship later never rewrites an issued fee).
+  let discHtml='';
+  if(feeDiscountAmt(f)>0){
+    discHtml=`<div style="background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:12px 14px;margin-top:12px">
+      <div style="font-size:10px;font-weight:700;color:var(--g7);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">🎓 Discount Applied</div>
+      <div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>Fee before discount</span><span>Rs ${fmt(feeGrossAmt(f))}</span></div>
+      ${feeScholarshipAmt(f)>0?`<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1);color:var(--g7)"><span>− ${htmlEsc(f.scholarshipLabel||'Scholarship')}</span><strong>Rs ${fmt(feeScholarshipAmt(f))}</strong></div>`:''}
+      ${feeConcessionAmt(f)>0?`<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1);color:var(--g7)"><span>− Concession${f.discountReason?' · '+htmlEsc(f.discountReason):''}</span><strong>Rs ${fmt(feeConcessionAmt(f))}</strong></div>`:''}
+      <div style="display:flex;justify-content:space-between;font-size:13px;padding:6px 0 0;font-weight:700"><span>Net payable</span><span>Rs ${fmt(f.amt)}</span></div>
+    </div>`;
+  }
+  // Payment history for THIS record (D.feePayments was being written but never
+  // shown anywhere in the app).
+  const payList=feePaymentsFor(f);
+  const historyHtml=(payList.length||feePaidAmt(f)>0)
+    ? `<div style="background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:12px 14px;margin-top:12px">
+        <div style="font-size:10px;font-weight:700;color:var(--g7);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">📜 Payment History</div>
+        ${feePaymentHistoryHtml(payList,{})}
+      </div>`
     : '';
   // Bulk-assigned fees (Lab Fee, Sports Fee, etc.) merged into this voucher —
   // shown as their own breakdown rows instead of just an amount bump.
   let extraFeesHtml='';
   if(f.extraFees&&f.extraFees.length){
     const appliedLateFeeAmt=f.lateFeeApplied?(f.appliedLateFeeAmt||0):0;
-    const extraTotal=f.extraFees.reduce((a,e)=>a+(e.amt||0),0);
-    const baseAmt=f.amt-appliedLateFeeAmt-extraTotal;
+    // Break the voucher down in GROSS terms and subtract the relief once at the
+    // bottom, otherwise the discount silently eats into the tuition line.
+    const extraGross=f.extraFees.reduce((a,e)=>a+(e.grossAmt||e.amt||0),0);
+    const baseAmt=feeGrossAmt(f)-appliedLateFeeAmt-extraGross;
+    const relief=feeDiscountAmt(f);
     extraFeesHtml=`<div style="background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:12px 14px;margin-top:12px">
       <div style="font-size:10px;font-weight:700;color:var(--g7);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">🧾 Fee Breakdown</div>
       <div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1)"><span>${(f.baseCategory&&f.baseCategory!=='Tuition')?f.baseCategory:'Tuition Fee'}</span><strong>Rs ${fmt(baseAmt)}</strong></div>
-      ${f.extraFees.map(ex=>`<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1);color:#0e5c8c"><span>📦 ${ex.category}</span><strong>Rs ${fmt(ex.amt||0)}</strong></div>`).join('')}
+      ${f.extraFees.map(ex=>`<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1);color:#0e5c8c"><span>📦 ${ex.category}</span><strong>Rs ${fmt(ex.grossAmt||ex.amt||0)}</strong></div>`).join('')}
+      ${appliedLateFeeAmt>0?`<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1);color:#b91c1c"><span>⚠️ Late Fee</span><strong>Rs ${fmt(appliedLateFeeAmt)}</strong></div>`:''}
+      ${relief>0?`<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--g1);color:var(--g7)"><span>− Discount / Scholarship</span><strong>Rs ${fmt(relief)}</strong></div>`:''}
       <div style="display:flex;justify-content:space-between;font-size:13px;padding:6px 0 0;font-weight:700"><span>Total</span><span>Rs ${fmt(f.amt)}</span></div>
     </div>`;
   }
-  $('vFeeBody').innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px;margin-bottom:12px">${[['Receipt No',`<code class="id-tag">${f.receipt||'-'}</code>`],['Student Name',`<strong>${f.student}</strong>`],['Roll Number',f.roll],['Fee Category',f.category||'Tuition'],['Gender',(stu.gender||'-')],['Department',(stu.dept||'-')],['Program',(stu.cls||'-')],['Semester',f.sem],['Amount',`<strong class="pos">Rs ${fmt(f.amt)}</strong>`],['Due Date',f.dueDate||'-'],['Payment Date',f.date&&f.date!=='-'?f.date:'-'],['Method',f.method&&f.method!=='-'?f.method:'-'],['Status',bdg(f.status)]].map(([k,v])=>`<div><div style="font-size:10px;font-weight:700;color:var(--s4);text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">${k}</div><div>${v}</div></div>`).join('')}</div>${instHtml}${extraFeesHtml}${lateFeeHtml}<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">${f.status==='Paid'?`<button class="mo-save" onclick="printReceipt(${idx});closeMo('viewFee')">🧾 Print Receipt</button>`:`<button class="mo-save" onclick="closeMo('viewFee');quickCollect(${idx})">💳 Collect Payment</button>`}<button class="mo-cancel" onclick="closeMo('viewFee');openEditFee(${idx})">✏️ Edit</button></div>`;
+  const vSt=feeComputeStatus(f);
+  const vPaid=feePaidAmt(f), vRem=feeRemainingAmt(f);
+  const rows=[
+    ['Receipt No',`<code class="id-tag">${htmlEsc(f.receipt||'-')}</code>`],
+    ['Student Name',`<strong>${htmlEsc(f.student)}</strong>`],
+    ['Roll Number',htmlEsc(f.roll)],
+    ['Fee Category',htmlEsc(f.category||'Tuition')],
+    ['Gender',htmlEsc(stu.gender||'-')],
+    ['Department',htmlEsc(stu.dept||'-')],
+    ['Program',htmlEsc(stu.cls||'-')],
+    ['Semester',htmlEsc(f.sem||'-')],
+    ['Payable Amount',`<strong class="pos">Rs ${fmt(f.amt)}</strong>${feeDiscountAmt(f)>0?`<div style="font-size:10px;color:var(--g7);margin-top:2px">after Rs ${fmt(feeDiscountAmt(f))} relief on Rs ${fmt(feeGrossAmt(f))}</div>`:''}`],
+    ['Paid So Far',`<strong style="color:${vPaid>0?'var(--g7)':'var(--s4)'}">Rs ${fmt(vPaid)}</strong>`],
+    ['Balance',`<strong style="color:${vRem>0?(vSt.indexOf('Overdue')>=0?'#b91c1c':'#d97706'):'var(--g7)'}">Rs ${fmt(vRem)}</strong>`],
+    ['Due Date',htmlEsc(f.dueDate||'-')],
+    ['Last Payment Date',f.date&&f.date!=='-'?htmlEsc(f.date):'-'],
+    ['Method',f.method&&f.method!=='-'?htmlEsc(f.method):'-'],
+    ['Status',bdg(vSt)]
+  ];
+  $('vFeeBody').innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px;margin-bottom:12px">${rows.map(([k,v])=>`<div><div style="font-size:10px;font-weight:700;color:var(--s4);text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">${k}</div><div>${v}</div></div>`).join('')}</div>${discHtml}${instHtml}${extraFeesHtml}${historyHtml}${lateFeeHtml}<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">${vSt==='Paid'
+    ?`<button class="mo-save" onclick="printReceipt(${idx});closeMo('viewFee')">🧾 Print Receipt</button>`
+    :`<button class="mo-save" onclick="closeMo('viewFee');quickCollect(${idx})">💳 Collect ${vPaid>0?'Balance':'Payment'}</button>${vPaid>0?`<button class="mo-cancel" onclick="printReceipt(${idx});closeMo('viewFee')">🧾 Print Receipt (paid so far)</button>`:''}`}<button class="mo-cancel" onclick="closeMo('viewFee');openFeeLedger('${htmlEsc(f.roll)}')">📜 Full Ledger</button><button class="mo-cancel" onclick="closeMo('viewFee');openEditFee(${idx})">✏️ Edit</button></div>`;
   showMo('viewFee');
 }
 
@@ -3756,6 +4135,7 @@ function saveFee(){
 
     D.feePayments.push({
       paymentId:'PMT-'+feeRC, roll:stuRoll, student:stuName,
+      feeId:ensureFeeId(f),
       planId:f.planId, instPart:f.instPart, instTotal:f.instTotal, voucherRef:f.receipt,
       amount:payNow, date:payDate, method, reference:receipt,
       receivedBy:(D.currentUser&&D.currentUser.name)||'System', status:'Success'
@@ -3780,40 +4160,78 @@ function saveFee(){
     return;
   }
 
-  // ── NON-INSTALMENT (full payment) RECORD: existing behavior, unchanged ──
+  // ── ORDINARY (NON-INSTALMENT) RECORD ─────────────────────────────────────
+  // Status is DERIVED from the money received, exactly like an instalment, so a
+  // part payment on an ordinary fee now produces Partial / Partial-Overdue and
+  // is appended to D.feePayments instead of being lost. The dropdown only says
+  // what the clerk INTENDS (Paid in full / Partial / Pending / Overdue).
   feeRC++;
-  const status=$('fst').value;
-  const isPaid=status==='Paid';
-  let amtVal=parseInt(fa)||0;
+  const chosen=$('fst').value;
+  const prev=(isEdit&&D.fees[editIdx])?D.fees[editIdx]:null;
+  const already=prev?feePaidAmt(prev):0;
+  let grossVal=parseInt(fa)||0;
+  let fineSum=feeModalFineSum();
   // Safety: if a pending fine's amount was folded into the displayed total
-  // (see applyPendingFinesToFeeModal) but staff ends up saving this record
-  // as NOT Paid, back the fine amount back out — otherwise it would sit
-  // baked into an unpaid fee record while the fine is still separately
-  // Pending, and get folded in a second time next time this fee is collected.
-  if(!isPaid && _feeIncludedFineIds.length){
+  // (see applyPendingFinesToFeeModal) but staff ends up NOT collecting this fee
+  // in full, back the fine amount back out — otherwise it would sit baked into
+  // an unpaid fee record while the fine is still separately Pending, and get
+  // folded in a second time next time this fee is collected.
+  if(chosen!=='Paid' && _feeIncludedFineIds.length){
     const backedOutSum=_feeIncludedFineIds.reduce((sum,fid)=>{
       const fine=D.fines.find(x=>x.fineId===fid);
       return fine&&fine.status!=='Paid'?sum+fine.amt:sum;
     },0);
-    amtVal=Math.max(0,amtVal-backedOutSum);
+    grossVal=Math.max(0,grossVal-backedOutSum);
+    fineSum=Math.max(0,fineSum-backedOutSum);
     _feeIncludedFineIds=[];
     const fnote=$('fee-fine-note'); if(fnote) fnote.style.display='none';
+    if(backedOutSum>0) toast('ℹ️ Rs '+fmt(backedOutSum)+' of pending fines was left out — fines are only folded in when the fee is collected in full');
   }
+  // Discount is applied BEFORE the amount is stored: `amt` is always the net
+  // payable figure, and the gross / relief components ride along for receipts
+  // and reporting.
+  const disc=feeModalDiscountFor(grossVal,fineSum);
+  const amtVal=disc.amt;
+  if(disc.concessionAmt>0&&!disc.discountReason){toast('❌ Please write the reason for the concession');return;}
+  if(amtVal<already){toast('❌ Rs '+fmt(already)+' has already been received on this fee — the payable amount cannot be reduced to Rs '+fmt(amtVal));return;}
+  // How much is being received right now
+  let payNow=0;
+  if(chosen==='Paid'){
+    payNow=Math.max(0,amtVal-already);
+  }else if(chosen==='Partial'){
+    payNow=Math.max(0,Math.min(parseInt(($('fPayNow')||{}).value)||0, amtVal-already));
+    if(payNow<=0){toast('Enter an amount greater than 0 to record a partial payment');return;}
+  }
+  const newPaid=Math.min(amtVal,already+payNow);
+  const dueVal=$('fdd').value||(prev&&prev.dueDate)||'';
+  // Pending / Overdue are honoured only while nothing has been received; the
+  // moment there is money against the record the status is computed, so it can
+  // never claim "unpaid" while holding cash (or "Partial" once fully paid).
+  const status=(newPaid<=0&&(chosen==='Pending'||chosen==='Overdue'))
+    ? chosen
+    : feeComputeStatus({amt:amtVal,paidAmt:newPaid,dueDate:dueVal});
+  const isPaid=status==='Paid';
+  const payDate=todayStr();
+  const method=$('fpm').value;
+  const receiptNo=($('frc').value.trim()||(prev&&prev.receipt&&prev.receipt!=='-'?prev.receipt:'REC-'+feeRC));
   // Only the fields this modal actually owns. On EDIT this is MERGED into the
   // existing record instead of replacing it — the old `D.fees[editIdx]=f`
   // silently dropped every field the modal doesn't know about: extraFees,
   // baseCategory, lateFeeApplied / appliedLateFeeAmt (so a late fee could be
   // charged twice), voucherNo, txSeq, and the instalment fields.
-  const prev=(isEdit&&D.fees[editIdx])?D.fees[editIdx]:null;
   const patch={
     student:stuName, roll:stuRoll,
     sem:$('fsm').value,
-    amt:amtVal, paidAmt:isPaid?amtVal:0,
-    date:isPaid?todayStr():'-',
-    method:isPaid?$('fpm').value:'-',
-    receipt:isPaid?($('frc').value.trim()||(prev&&prev.receipt&&prev.receipt!=='-'?prev.receipt:'REC-'+feeRC)):'-',
+    grossAmt:disc.grossAmt, scholarshipAmt:disc.scholarshipAmt, scholarshipLabel:disc.scholarshipLabel,
+    concessionAmt:disc.concessionAmt, discountReason:disc.discountReason,
+    amt:amtVal, paidAmt:newPaid,
+    // A partial payment is a real payment: it must carry its date, method and
+    // receipt, not the '-' placeholders the old full-payment-only path wrote.
+    date:payNow>0?payDate:(prev&&prev.date?prev.date:'-'),
+    method:payNow>0?method:(prev&&prev.method?prev.method:'-'),
+    receipt:newPaid>0?receiptNo:'-',
     status:status,
-    dueDate:$('fdd').value||''
+    dueDate:dueVal
   };
   // Category is defaulted for NEW records only. Editing must never turn a
   // bulk-assigned "Lab Fee" / "Sports Fee" record back into "Tuition".
@@ -3829,30 +4247,34 @@ function saveFee(){
     f=Object.assign(D.fees[editIdx],patch); // merge, don't replace
     savedIdx=editIdx;
     auditLog('action','Fee updated: '+stuName);
-    if(isPaid){
-      const stu=D.students.find(s=>s.roll===stuRoll);
-      if(stu){
-        // The edited record is already updated in place, so a plain check is
-        // enough here (the old `xi===editIdx` test compared an index of the
-        // FILTERED array against an index into D.fees — wrong record).
-        const allStudentFees=D.fees.filter(x=>x.roll===stuRoll);
-        const allPaid=allStudentFees.every(x=>x.status==='Paid');
-        if(allPaid) stu.status='Paid';
-      }
-    }
   } else {
     f=patch;
     D.fees.push(f);
     savedIdx=D.fees.length-1;
-    auditLog('action','Fee recorded: '+stuName+' Rs '+f.amt);
-    // Update student status if new fee is Paid and all student fees are paid
-    if(isPaid){
-      const stu=D.students.find(s=>s.roll===stuRoll);
-      if(stu){
-        const allStudentFees=D.fees.filter(x=>x.roll===stuRoll);
-        const allPaid=allStudentFees.every(x=>x.status==='Paid');
-        if(allPaid) stu.status='Paid';
-      }
+    auditLog('action','Fee recorded: '+stuName+' Rs '+f.amt+(disc.scholarshipAmt+disc.concessionAmt>0?' (after Rs '+(disc.scholarshipAmt+disc.concessionAmt)+' relief on Rs '+disc.grossAmt+')':''));
+  }
+  // Money received in THIS save goes into the payment log, so the Transactions
+  // ledger and the per-student history show each instalment of cash separately
+  // instead of one lump that silently changes size.
+  if(payNow>0){
+    D.feePayments.push({
+      paymentId:'PMT-'+feeRC, roll:stuRoll, student:stuName,
+      feeId:ensureFeeId(f),
+      planId:f.planId||'', instPart:f.instPart||'', instTotal:f.instTotal||0, voucherRef:f.receipt,
+      amount:payNow, date:payDate, method:method, reference:receiptNo,
+      receivedBy:(D.currentUser&&D.currentUser.name)||'System', status:'Success'
+    });
+    auditLog('action',(isPaid?'Fee payment received: ':'Partial fee payment received: ')+stuName+' — Rs '+fmt(payNow)+' — '+feeStatusLabel(status));
+  }
+  // Overall student status follows the DERIVED status of every fee they hold, so
+  // a partially-paid record keeps them out of the "Paid" bucket.
+  {
+    const stu=D.students.find(s=>s.roll===stuRoll);
+    if(stu){
+      const mine=D.fees.filter(x=>x.roll===stuRoll);
+      const allPaid=mine.length>0&&mine.every(x=>feeComputeStatus(x)==='Paid');
+      const anyOverdue=mine.some(x=>feeComputeStatus(x).includes('Overdue'));
+      stu.status=allPaid?'Paid':anyOverdue?'Overdue':'Pending';
     }
   }
   // If this fee record is linked to a disciplinary fine and it's now Paid,
@@ -3877,14 +4299,15 @@ function saveFee(){
   buildTx();rFees();rFines();rTx();rDash();rStudents();
   closeMo('addFee');
   _feeSelectedStu=null;
-  // Auto-print receipt immediately when paid
-  if(isPaid && savedIdx>=0){
-    toast('✅ Payment saved — printing receipt…');
+  // Auto-print a receipt whenever money changed hands — a partial payment is a
+  // real payment, so it gets a receipt for the amount received today (not for
+  // the whole fee).
+  if(payNow>0 && savedIdx>=0){
+    toast(isPaid
+      ? '✅ Payment saved — printing receipt…'
+      : '✅ Partial payment of Rs '+fmt(payNow)+' recorded — '+feeStatusLabel(status)+'. Remaining Rs '+fmt(Math.max(0,amtVal-newPaid))+' — printing receipt…');
     // Small delay to let modal close + DOM settle before printing
-    setTimeout(()=>{
-      const fee=D.fees[savedIdx];
-      if(fee && fee.status==='Paid') printReceipt(savedIdx);
-    }, 600);
+    setTimeout(()=>{ if(D.fees[savedIdx]) printReceipt(savedIdx,payNow); }, 600);
   } else {
     toast('Fee record saved!');
   }
@@ -3894,9 +4317,11 @@ function saveFeeInstalments(){
   if(!requirePerm('canEdit','save fee instalments'))return;
   const stuName=($('fn')||{}).value||'';
   const stuRoll=($('fr')||{}).value||'';
-  const fa=parseInt($('fa').value)||0;
+  // #fa is the GROSS fee (before relief). The plan is always split over the NET
+  // payable figure, which is what each instalment record stores as its `amt`.
+  const grossVal=parseInt($('fa').value)||0;
   const sem=$('fsm').value;
-  if(!stuName||!stuRoll||!fa){toast('Student and Amount are required');return;}
+  if(!stuName||!stuRoll||!grossVal){toast('Student and Amount are required');return;}
 
   // ── Pending fines folded into the total ──────────────────────────────────
   // applyPendingFinesToFeeModal() inflates #fa by the student's unpaid fines so
@@ -3912,19 +4337,24 @@ function saveFeeInstalments(){
     // status now — back it out unconditionally. (saveFee() skips already-Paid
     // fines because that same save is what settles them; nothing is settled
     // here.)
-    const fineSum=_feeIncludedFineIds.reduce((sum,fid)=>{
-      const fine=D.fines.find(x=>x.fineId===fid);
-      return fine?sum+(Number(fine.amt)||0):sum;
-    },0);
+    const fineSum=feeModalFineSum();
     _feeIncludedFineIds=[];
     const fnote=$('fee-fine-note'); if(fnote) fnote.style.display='none';
     if(fineSum>0){
-      $('fa').value=Math.max(0,fa-fineSum);
-      feeGenInstalments();
+      $('fa').value=Math.max(0,grossVal-fineSum);
+      feeDiscountChange(); // refresh the relief box AND re-split the instalments
       toast('ℹ️ Rs '+fineSum.toLocaleString()+' of pending fines was removed from the total — fines are collected separately, not through an instalment plan. Please review the amounts and save again.');
       return;
     }
   }
+
+  // Relief on the whole plan, computed once. No fines are folded in at this
+  // point (the block above returns when there were any), so the entire gross is
+  // discountable.
+  const disc=feeModalDiscountFor(grossVal,0);
+  const fa=disc.amt; // NET total the instalments must add up to
+  if(disc.concessionAmt>0&&!disc.discountReason){toast('❌ Please write the reason for the concession');return;}
+  if(fa<=0){toast('❌ The relief cancels out the whole fee — there is nothing left to split into instalments');return;}
 
   // ── EDIT MODE ────────────────────────────────────────────────────────────
   // This function used to ignore feeEditIdx completely: it pushed N brand-new
@@ -3974,6 +4404,19 @@ function saveFeeInstalments(){
   }
   // Unique id per plan — see note in the student-add instalment branch above.
   const planId=stuRoll+'-'+Date.now()+'-'+Math.floor(Math.random()*1000);
+  // Spread the relief across the parts in proportion to each part's net amount,
+  // with the last part absorbing the rounding remainder, so Σ grossAmt equals
+  // the gross fee exactly and no part can ever show a negative relief.
+  const splitRelief=total=>{
+    const out=new Array(count).fill(0);
+    if(!(total>0)) return out;
+    let used=0;
+    for(let i=0;i<count-1;i++){ out[i]=Math.floor(total*amounts[i]/fa); used+=out[i]; }
+    out[count-1]=total-used;
+    return out;
+  };
+  const schParts=splitRelief(disc.scholarshipAmt);
+  const concParts=splitRelief(disc.concessionAmt);
   for(let i=0;i<count;i++){
     feeRC++;
     const dueDate=parseDate(dueDates[i]); // local midnight, never UTC
@@ -3981,6 +4424,9 @@ function saveFeeInstalments(){
     const monthLabel=months[dueDate.getMonth()]+' '+dueDate.getFullYear();
     D.fees.push({
       student:stuName, roll:stuRoll, sem:sem,
+      grossAmt:amounts[i]+schParts[i]+concParts[i],
+      scholarshipAmt:schParts[i], scholarshipLabel:disc.scholarshipLabel,
+      concessionAmt:concParts[i], discountReason:disc.discountReason,
       amt:amounts[i], paidAmt:0,
       date:'-', method:'-',
       receipt:'INST-'+feeRC,
@@ -3997,8 +4443,8 @@ function saveFeeInstalments(){
   }
   // Update student status
   const stu=D.students.find(s=>s.roll===stuRoll);
-  if(stu&&stu.status!=='Paid') stu.status=D.fees.some(f=>f.roll===stuRoll&&f.status==='Overdue')?'Overdue':'Pending';
-  auditLog('action',count+'-part fee structure created: '+stuName+' — Total Rs '+fa+' ('+amounts.map(a=>'Rs '+a.toLocaleString()).join(' + ')+')');
+  if(stu&&stu.status!=='Paid') stu.status=D.fees.some(f=>f.roll===stuRoll&&feeComputeStatus(f).indexOf('Overdue')>=0)?'Overdue':'Pending';
+  auditLog('action',count+'-part fee structure created: '+stuName+' — Total Rs '+fa+' ('+amounts.map(a=>'Rs '+a.toLocaleString()).join(' + ')+')'+(disc.scholarshipAmt+disc.concessionAmt>0?' after Rs '+(disc.scholarshipAmt+disc.concessionAmt)+' relief on Rs '+disc.grossAmt:''));
   buildTx();rFees();rTx();rDash();rStudents();
   closeMo('addFee');
   toast(`✅ Fee structure saved — ${count} instalments created!`);
@@ -4007,6 +4453,75 @@ function saveFeeInstalments(){
 
 // ── Fee modal state ──
 let _feeSelectedStu=null;
+
+/* ── Fee modal: discount / concession ──────────────────────────────────────
+   #fa holds the GROSS fee (before any relief). The NET payable — which is what
+   gets stored as the record's `amt` — is gross − scholarship − concession, and
+   every other part of this modal (instalment split, partial-payment cap, step-3
+   summary, save) reads it through feeModalDiscount(), so they can never
+   disagree with each other or with what the clerk is looking at.
+──────────────────────────────────────────────────────────────────────────── */
+function feeModalFineSum(){
+  return (_feeIncludedFineIds||[]).reduce((sum,fid)=>{
+    const fine=D.fines.find(x=>x.fineId===fid);
+    return fine?sum+(Number(fine.amt)||0):sum;
+  },0);
+}
+function feeModalDiscountFor(gross,fineSum,stu){
+  gross=Math.max(0,Number(gross)||0);
+  // A disciplinary fine folded into this total is not tuition, so it must not
+  // attract a percentage scholarship — take it out, apply the relief to the
+  // rest, then add it back on both the gross and the net.
+  fineSum=Math.max(0,Math.min(gross,Number(fineSum)||0));
+  const conc=Math.max(0,parseInt(($('fConc')||{}).value)||0);
+  const reason=(($('fConcReason')||{}).value||'');
+  const d=buildFeeDiscount(stu||_feeSelectedStu,gross-fineSum,conc,reason);
+  d.grossAmt+=fineSum;
+  d.amt+=fineSum;
+  d.fineAmt=fineSum;
+  return d;
+}
+function feeModalDiscount(){
+  return feeModalDiscountFor(parseInt(($('fa')||{}).value)||0,feeModalFineSum());
+}
+function feeModalNetAmt(){ return feeModalDiscount().amt; }
+// Fills #fa / #fConc / #fConcReason from an existing record (edit + collect
+// paths). #fa must get the GROSS figure: putting the already-discounted `amt`
+// there would apply the same scholarship a second time on save.
+function feeModalLoadDiscount(f,extra){
+  if($('fa')) $('fa').value=feeGrossAmt(f)+(Number(extra)||0);
+  if($('fConc')) $('fConc').value=feeConcessionAmt(f);
+  if($('fConcReason')) $('fConcReason').value=f.discountReason||'';
+  feeDiscountChange();
+}
+function feeDiscountChange(){
+  const conc=Math.max(0,parseInt(($('fConc')||{}).value)||0);
+  const rw=$('fConcReasonWrap'); if(rw) rw.style.display=conc>0?'block':'none';
+  feeDiscountRefresh();
+  feeGenInstalments(); // the instalment rows must re-split the NET amount
+}
+function feeDiscountRefresh(){
+  const d=feeModalDiscount();
+  const box=$('fDiscBox');
+  if(box){
+    const rows=[];
+    if(d.fineAmt>0) rows.push(['🚨 Pending fines included','+ Rs '+fmt(d.fineAmt),'#b91c1c']);
+    if(d.scholarshipAmt>0) rows.push(['🎓 '+htmlEsc(d.scholarshipLabel||'Scholarship'),'− Rs '+fmt(d.scholarshipAmt),'var(--g7)']);
+    if(d.concessionAmt>0) rows.push(['🏷️ Concession'+(d.discountReason?' — '+htmlEsc(d.discountReason):''),'− Rs '+fmt(d.concessionAmt),'var(--g7)']);
+    if(!rows.length){
+      box.style.display='none';
+    }else{
+      box.innerHTML=`<div style="display:flex;justify-content:space-between;padding:2px 0;color:var(--s5)"><span>Total fee</span><span>Rs ${fmt(d.grossAmt-d.fineAmt)}</span></div>`
+        +rows.map(r=>`<div style="display:flex;justify-content:space-between;padding:2px 0;color:${r[2]}"><span>${r[0]}</span><span>${r[1]}</span></div>`).join('')
+        +`<div style="display:flex;justify-content:space-between;padding:5px 0 0;margin-top:4px;border-top:1px solid var(--g1);font-weight:800;color:var(--s6)"><span>Net payable</span><span>Rs ${fmt(d.amt)}</span></div>`;
+      box.style.display='block';
+    }
+  }
+  // Keep the partial-payment box (cap, labels, preview) in step with the total
+  const wrap=$('fPartialPayWrap');
+  if(wrap&&wrap.style.display!=='none') feePreviewPartial();
+  return d;
+}
 
 function openAddFee(){
   _feeSelectedStu=null;
@@ -4021,6 +4536,13 @@ function openAddFee(){
   $('fstep1-next').style.opacity='.4';
   $('fa').value='25000';
   $('frc').value='';
+  if($('fConc')) $('fConc').value='0';
+  if($('fConcReason')) $('fConcReason').value='';
+  if($('fst')) $('fst').value='Paid';
+  if($('fStatusWrap')) $('fStatusWrap').style.display='block';
+  if($('fPayNow')) $('fPayNow').value='';
+  feeStatusChange('Paid');
+  feeDiscountChange();
   $('fInstCheck').checked=false;
   feeToggleInstalment(false);
   const instWrapAdd=$('fInstToggleWrap'); if(instWrapAdd) instWrapAdd.style.display='block';
@@ -4043,7 +4565,7 @@ function openEditFee(idx){
   $('fn').value=f.student;
   $('fr').value=f.roll;
   feeShowSelected(_feeSelectedStu);
-  $('fa').value=f.amt;
+  feeModalLoadDiscount(f,0);
   $('fsm').value=f.sem;
   $('fpm').value=f.method!=='-'?f.method:'Cash';
   $('frc').value=f.receipt!=='-'?f.receipt:'';
@@ -4061,60 +4583,76 @@ function openEditFee(idx){
     // amount paid, never chosen manually, so it can't drift out of sync.
     $('fStatusWrap').style.display='none';
     $('fPartialPayWrap').style.display='block';
-    const already=feePaidAmt(f);
-    $('fPay-already').textContent='Rs '+already.toLocaleString();
-    $('fPay-owed').textContent='Rs '+f.amt.toLocaleString();
     $('fPayNow').value=feeRemainingAmt(f);
-    $('fPayNow').max=feeRemainingAmt(f);
-    feePreviewPartial();
+    feePreviewPartial(); // fills Already Paid / Total Payable / preview + cap
     $('fst').value=feeComputeStatus(f)==='Paid'?'Paid':'Pending'; // kept in sync for saveFee's isEdit branch, but not shown
   }else{
     $('fStatusWrap').style.display='block';
-    $('fPartialPayWrap').style.display='none';
-    $('fst').value=f.status;
-    feeStatusChange(f.status);
+    // The dropdown carries the four states a clerk can CHOOSE; the overdue
+    // variants are derived on save, so map them back onto their base state.
+    // (Assigning a value that has no matching <option> silently blanks the
+    // select, which is why 'Partial-Overdue' must not be assigned directly.)
+    const cur=feeComputeStatus(f);
+    const chosen=cur==='Paid'?'Paid':cur.startsWith('Partial')?'Partial':cur==='Overdue'?'Overdue':'Pending';
+    $('fst').value=chosen;
+    // Prefill with what is still owed when money has already come in (the
+    // usual case is "collect the rest"); a fresh Partial entry starts empty so
+    // nothing is recorded by accident.
+    $('fPayNow').value=feePaidAmt(f)>0?feeRemainingAmt(f):'';
+    feeStatusChange(chosen);
   }
   // If this is an instalment fee, show the full plan overview below step indicator
-  feeShowInstPlan(f.roll, f.instTotal||null);
+  feeShowInstPlan(f.roll, f.instTotal||null, f);
   feeStep(2);
   showMo('addFee');
 }
 
-// Live preview shown while entering a partial payment against an instalment
-// — recalculates new cumulative paid amount, resulting status, and
-// remaining balance on every keystroke, and caps entry at what's still owed
-// (never allow Paid Amount > Payable Amount).
+// Live preview shown while entering a payment — recalculates the new
+// cumulative paid amount, the resulting status and the remaining balance on
+// every keystroke, and caps entry at what is still owed (paid can never exceed
+// payable). Works for instalment rows, for ordinary fees, and for brand-new
+// records that don't exist in D.fees yet.
 function feePreviewPartial(){
-  const idx=parseInt($('feeEditIdx').value);
-  const f=D.fees[idx];
-  if(!f)return;
-  const already=feePaidAmt(f);
-  const owed=f.amt;
-  let payNow=parseInt($('fPayNow').value)||0;
-  const maxAllowed=owed-already;
-  if(payNow>maxAllowed){ payNow=maxAllowed; $('fPayNow').value=maxAllowed; }
-  if(payNow<0){ payNow=0; $('fPayNow').value=0; }
+  const idx=parseInt(($('feeEditIdx')||{}).value);
+  const f=(idx>=0)?D.fees[idx]:null;
+  // An instalment row bills its own fixed amount; everything else bills the NET
+  // payable currently entered in this modal, so the cap follows the discount
+  // fields live.
+  const owed=(f&&f.isInstalment)?f.amt:feeModalNetAmt();
+  const already=f?feePaidAmt(f):0;
+  const maxAllowed=Math.max(0,owed-already);
+  let payNow=parseInt(($('fPayNow')||{}).value)||0;
+  if(payNow>maxAllowed){ payNow=maxAllowed; if($('fPayNow')) $('fPayNow').value=maxAllowed; }
+  if(payNow<0){ payNow=0; if($('fPayNow')) $('fPayNow').value=0; }
+  if($('fPayNow')) $('fPayNow').max=maxAllowed;
+  if($('fPay-already')) $('fPay-already').textContent='Rs '+fmt(already);
+  if($('fPay-owed')) $('fPay-owed').textContent='Rs '+fmt(owed);
   const newPaid=already+payNow;
-  const newStatus=newPaid>=owed?'Paid':newPaid>0?'Partial':'Pending';
+  const newStatus=feeComputeStatus({amt:owed,paidAmt:newPaid,dueDate:($('fdd')||{}).value||(f&&f.dueDate)||''});
   const box=$('fPay-preview');
   if(box){
-    box.style.color=newStatus==='Paid'?'#065f46':newStatus==='Partial'?'#92400e':'#6b7280';
-    box.textContent=`→ New status: ${feeStatusLabel(newStatus)} · Paid so far: Rs ${newPaid.toLocaleString()} · Remaining: Rs ${(owed-newPaid).toLocaleString()}`;
+    box.style.color=newStatus==='Paid'?'#065f46':newStatus.startsWith('Partial')?'#92400e':'#6b7280';
+    box.textContent=`→ New status: ${feeStatusLabel(newStatus)} · Paid so far: Rs ${fmt(newPaid)} · Remaining: Rs ${fmt(Math.max(0,owed-newPaid))}`;
   }
 }
 
-function feeShowInstPlan(roll, instTotal){
+function feeShowInstPlan(roll, instTotal, ref){
   const planDiv=$('fee-inst-plan');
   if(!planDiv) return;
-  if(!instTotal){planDiv.style.display='none';return;}
+  if(!instTotal&&!(ref&&ref.isInstalment)){planDiv.style.display='none';return;}
   const today=new Date(); today.setHours(0,0,0,0);
-  const allInst=D.fees.filter(f=>f.roll===roll&&f.isInstalment&&f.instTotal===instTotal);
+  // Group by planId whenever we were handed the actual record: two separate
+  // plans for the same student can share roll+instTotal, and lumping them
+  // together would show one impossible "8 of 4 paid" schedule.
+  const allInst=(ref&&ref.isInstalment)
+    ? instPlanRows(ref)
+    : D.fees.filter(f=>f.roll===roll&&f.isInstalment&&f.instTotal===instTotal);
   if(!allInst.length){planDiv.style.display='none';return;}
   const paidCount=allInst.filter(f=>feeComputeStatus(f)==='Paid').length;
   const totalCount=allInst.length;
   const paidAmt=allInst.reduce((a,b)=>a+feePaidAmt(b),0);
-  const totalAmt=allInst.reduce((a,b)=>a+b.amt,0);
-  const pct=Math.round((paidAmt/totalAmt)*100);
+  const totalAmt=allInst.reduce((a,b)=>a+(Number(b.amt)||0),0);
+  const pct=totalAmt>0?Math.round((paidAmt/totalAmt)*100):0;
   let html=`<div style="margin-bottom:14px;background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:12px 14px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <span style="font-size:12px;font-weight:700;color:var(--g7)">📆 Instalment Plan Progress</span>
@@ -4153,14 +4691,17 @@ function feeStep(n){
     if(ind){ind.style.background=i===n?'var(--g6)':i<n?'var(--g1)':'var(--s1)';ind.style.color=i===n?'#fff':i<n?'var(--g7)':'var(--s4)';}
   });
   if(n===3){
-    // Fill summary
-    const fa=parseInt($('fa').value)||0;
+    // Fill summary — always the NET payable, with the relief spelled out so the
+    // clerk confirms the same figure that will be saved.
+    const d=feeDiscountRefresh();
+    const fa=d.amt;
+    const relief=d.scholarshipAmt+d.concessionAmt;
     const st=$('fst').value;
     $('fsum-name').textContent=_feeSelectedStu?_feeSelectedStu.name:'—';
     $('fsum-roll').textContent=_feeSelectedStu?_feeSelectedStu.roll:'—';
-    $('fsum-amt').textContent='Rs '+fmt(fa);
+    $('fsum-amt').innerHTML='Rs '+fmt(fa)+(relief>0?` <span style="font-size:11px;font-weight:600;color:var(--g7)">(after Rs ${fmt(relief)} relief)</span>`:'');
     $('fsum-st').innerHTML=bdg(st);
-    $('fsum-mt').textContent=st==='Paid'?$('fpm').value:'N/A';
+    $('fsum-mt').textContent=(st==='Paid'||st==='Partial')?$('fpm').value:'N/A';
     $('fInst-total').textContent='Rs '+fmt(fa);
     feeGenInstalments();
     const withInst=$('fInstCheck').checked;
@@ -4201,6 +4742,9 @@ function feeSelectStu(roll){
   $('fr').value=s.roll;
   $('fa').value=s.fee||25000;
   $('fa').value=applyPendingFinesToFeeModal(s.roll,parseInt($('fa').value)||0);
+  // The student is what decides the standing scholarship, so the discount box
+  // and the instalment split have to be recomputed now that one is selected.
+  feeDiscountChange();
   // Set semester from student
   const semEl=$('fsm');
   for(let i=0;i<semEl.options.length;i++){if(semEl.options[i].value===s.sem||semEl.options[i].text===s.sem){semEl.selectedIndex=i;break;}}
@@ -4232,7 +4776,21 @@ function feeDeselectStu(){
 
 function feeStatusChange(val){
   const pmWrap=$('fpm-wrap');
-  if(pmWrap) pmWrap.style.display=val==='Paid'?'block':'none';
+  // A method is only meaningful when money is actually changing hands.
+  if(pmWrap) pmWrap.style.display=(val==='Paid'||val==='Partial')?'block':'none';
+  // Instalment rows own the partial box themselves (openEditFee keeps it open
+  // and hides the status dropdown), so leave it alone for them.
+  const editIdx=parseInt(($('feeEditIdx')||{}).value);
+  const rec=(editIdx>=0)?D.fees[editIdx]:null;
+  if(rec&&rec.isInstalment) return;
+  const wrap=$('fPartialPayWrap');
+  if(!wrap) return;
+  if(val==='Partial'){
+    wrap.style.display='block';
+    feePreviewPartial();
+  }else{
+    wrap.style.display='none';
+  }
 }
 
 function feeToggleInstalment(on){
@@ -4240,6 +4798,7 @@ function feeToggleInstalment(on){
 }
 
 function feeUpdateInstalment(){
+  feeDiscountRefresh();
   feeGenInstalments();
 }
 
@@ -4257,7 +4816,9 @@ function feeGetInstCount(){
 // and disables Save until the N amounts add up exactly to the Total Fee
 // entered in Step 2.
 function feeGenInstalments(){
-  const fa=parseInt($('fa').value)||0;
+  // The plan splits the NET payable (after scholarship + concession), never the
+  // gross figure typed into #fa.
+  const fa=feeModalNetAmt();
   const count=feeGetInstCount();
   const firstDueDateStr=$('fdd').value||isoDate();
   const firstDue=parseDate(firstDueDateStr);
@@ -4295,7 +4856,7 @@ function feeGenInstalments(){
 // core validation rule the whole N-part system depends on. N comes from
 // feeGetInstCount(), same as feeGenInstalments(), so they always agree.
 function feeValidateInstSum(){
-  const fa=parseInt($('fa').value)||0;
+  const fa=feeModalNetAmt();
   const count=feeGetInstCount();
   const amounts=Array.from({length:count},(_,i)=>parseInt(($('fInstAmt'+i)||{}).value)||0);
   const sum=amounts.reduce((a,b)=>a+b,0);
@@ -4331,10 +4892,20 @@ function getOrAssignVoucherNo(f){
   return f.voucherNo;
 }
 
-function printInstalmentVouchers(roll, instTotal, mode){
+// `planKey` is an instPlanKey() string (f.planId, or the legacy 'roll|instTotal'
+// form). It must be the plan KEY and not the plan total: a student can hold two
+// separate plans with the same total — next semester at the same rate — and
+// resolving by total alone silently printed the first plan's instalments for
+// both. A bare number is still accepted so older callers keep working.
+function printInstalmentVouchers(roll, planKey, mode){
   mode=mode||'all';
   const stu=D.students.find(s=>s.roll===roll)||{};
-  const plan=instPlanSummary({roll,instTotal});
+  const legacyTotal=(typeof planKey==='number')?planKey:null;
+  const anchor=(legacyTotal!=null)
+    ? D.fees.find(f=>f.roll===roll&&f.isInstalment&&f.instTotal===legacyTotal)
+    : (planKey ? D.fees.find(f=>f.isInstalment&&instPlanKey(f)===String(planKey)) : null);
+  const resolved=anchor||D.fees.find(f=>f.roll===roll&&f.isInstalment);
+  const plan=resolved?instPlanSummary(resolved):{rows:[]};
   if(!plan.rows.length){toast('No instalment plan found for this student');return;}
 
   let rows=plan.rows;
@@ -4352,7 +4923,9 @@ function printInstalmentVouchers(roll, instTotal, mode){
     const remaining=feeRemainingAmt(f);
     const voucherNo=getOrAssignVoucherNo(f);
     const dueFmtd=f.dueDate?parseDate(f.dueDate).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}):'—';
-    const qrPayload=`VCH:${voucherNo}|ROLL:${roll}|INST:${f.instPart}|AMT:${f.amt}|PAID:${paid}`;
+    // Same key names as printVoucher()'s payload so one scanner can read both:
+    // DUE is the due DATE, REM is the money still owed.
+    const qrPayload=`VCH:${voucherNo}|ROLL:${roll}|INST:${f.instPart||''}|AMT:${f.amt}|PAID:${paid}|REM:${remaining}|DUE:${f.dueDate||''}`;
     const isPaid=status==='Paid';
 
     const infoRow=(label,val)=>`<div class="iv-row"><span class="iv-lb">${label}</span><span class="iv-vl">${val}</span></div>`;
@@ -4381,8 +4954,9 @@ function printInstalmentVouchers(roll, instTotal, mode){
 
       <div class="iv-divider"></div>
 
-      ${infoRow('Total Fee',fmtRs(f.instTotal))}
+      ${infoRow('Total Fee',fmtRs(plan.totalFee))}
       ${infoRow('This Instalment Amount',fmtRs(f.amt))}
+      ${feeDiscountAmt(f)>0?infoRow('Discount on this instalment','− '+fmtRs(feeDiscountAmt(f))+(f.scholarshipLabel?' ('+f.scholarshipLabel+')':''))+infoRow('Before discount',fmtRs(feeGrossAmt(f))):''}
       ${infoRow('Paid Amount',fmtRs(paid))}
       ${infoRow('Remaining (this instalment)',fmtRs(remaining))}
       ${infoRow('Instalments Paid',plan.paidCount+' of '+plan.rows.length)}
@@ -4533,12 +5107,13 @@ function printReceipt(idx, paymentAmount){
   let feeLabel='Tuition Fee — Full Payment', totalFeeForDoc=f.amt, paidToDate=receivedNow,
       outstanding=0, instRows='', instCount='', instPaidCount=0;
   if(isInstalment){
-    const allInst=instPlanRows(f);
-    instPaidCount=allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
+    const plan=instPlanSummary(f);
+    const allInst=plan.rows;
+    instPaidCount=plan.paidCount;
     instCount=allInst.length;
-    paidToDate=allInst.reduce((a,b)=>a+feePaidAmt(b),0);
-    totalFeeForDoc=f.instTotal;
-    outstanding=Math.max(0,totalFeeForDoc-paidToDate);
+    paidToDate=plan.totalPaid;
+    totalFeeForDoc=plan.totalFee;
+    outstanding=plan.totalRemaining;
     feeLabel=`Tuition Fee — Instalment ${f.instPart||''}`.trim();
     instRows = allInst.map((inst,i)=>{
       const st=feeComputeStatus(inst);
@@ -4546,13 +5121,27 @@ function printReceipt(idx, paymentAmount){
       return `<tr style="background:${isPaidRow?'#f0fdf4':isThis?'#fffbeb':'#fff'}">
         <td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:center;font-weight:${isThis?800:600}">${inst.instPart||(i+1)+'/'+allInst.length}</td>
         <td style="padding:5px 8px;border:1px solid #e2e8f0">${inst.dueDate||'—'}</td>
-        <td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:700">Rs ${inst.amt.toLocaleString()}</td>
+        <td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:700">Rs ${(Number(inst.amt)||0).toLocaleString()}${st.indexOf('Partial')===0?`<div style="font-size:9px;font-weight:600;color:#92400e">Rs ${feePaidAmt(inst).toLocaleString()} paid · Rs ${feeRemainingAmt(inst).toLocaleString()} due</div>`:''}</td>
         <td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:center;font-size:9.5px;font-weight:800;color:${isPaidRow?'#065f46':st.includes('Overdue')?'#b91c1c':'#92400e'}">${feeStatusLabel(st)}${isThis?' ◀':''}</td>
       </tr>`;
     }).join('');
   }else{
-    outstanding = Math.max(0, (f.amt||0) - receivedNow);
+    outstanding = Math.max(0, (f.amt||0) - feePaidAmt(f));
+    const head=(f.category&&f.category!=='Tuition')?f.category:'Tuition Fee';
+    feeLabel = outstanding>0
+      ? head+' — Part Payment'
+      : (feePaidAmt(f)>receivedNow ? head+' — Final Payment (balance cleared)' : head+' — Full Payment');
   }
+
+  // ── Relief granted on the record this receipt belongs to ─────────────────
+  // A receipt that only shows the net figure leaves the student unable to see
+  // that a scholarship/concession was honoured, so itemise it.
+  const rcRelief = feeDiscountAmt(f);
+  const rcGross  = feeGrossAmt(f);
+  const rcPaidBefore = Math.max(0, feePaidAmt(f) - receivedNow);
+  const discountRowsHtml = rcRelief>0 ? `
+        ${feeScholarshipAmt(f)>0?`<tr><td style="padding:5px 8px;border:1px solid #e2e8f0;color:#15803d">🎓 Less — ${f.scholarshipLabel||'Scholarship'}</td><td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${feeScholarshipAmt(f).toLocaleString()}</td></tr>`:''}
+        ${feeConcessionAmt(f)>0?`<tr><td style="padding:5px 8px;border:1px solid #e2e8f0;color:#15803d">🎓 Less — Concession${f.discountReason?' ('+f.discountReason+')':''}</td><td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${feeConcessionAmt(f).toLocaleString()}</td></tr>`:''}` : '';
 
   const FONT = `-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Arial,sans-serif`;
   const brand='#0d7a4f', brandDeep='#0a3d2a';
@@ -4631,6 +5220,24 @@ function printReceipt(idx, paymentAmount){
       </table>
 
       <div style="font-size:10px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:${brand};border-top:2px solid #eef0f2;border-bottom:2px solid #eef0f2;padding:8px 0;margin-bottom:14px">${feeLabel} — AY ${academicYear}</div>
+
+      <!-- CHARGE & PAYMENT SUMMARY — shows the relief honoured and any money
+           received earlier, so a part-payment receipt reconciles on its own. -->
+      ${(rcRelief>0||rcPaidBefore>0)?`
+      <table style="width:100%;border-collapse:collapse;margin-bottom:16px;font-size:11px">
+        <thead><tr style="background:#f8fafc">
+          <th style="padding:6px 8px;border:1px solid #e2e8f0;font-size:9px;text-transform:uppercase;color:#64748b;text-align:left;width:62%">This Fee — Charge &amp; Payment Summary</th>
+          <th style="padding:6px 8px;border:1px solid #e2e8f0;font-size:9px;text-transform:uppercase;color:#64748b;text-align:right">Amount (Rs)</th>
+        </tr></thead>
+        <tbody>
+          <tr><td style="padding:5px 8px;border:1px solid #e2e8f0;color:#334155">Fee before discount</td><td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:700">${rcGross.toLocaleString()}</td></tr>
+          ${discountRowsHtml}
+          <tr><td style="padding:5px 8px;border:1px solid #e2e8f0;font-weight:700;color:#0f172a">Net payable</td><td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:800">${(Number(f.amt)||0).toLocaleString()}</td></tr>
+          ${rcPaidBefore>0?`<tr><td style="padding:5px 8px;border:1px solid #e2e8f0;color:#15803d">✔ Received earlier</td><td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${rcPaidBefore.toLocaleString()}</td></tr>`:''}
+          <tr><td style="padding:5px 8px;border:1px solid #e2e8f0;color:#065f46;background:#f0fdf4;font-weight:700">✔ Received now (this receipt)</td><td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:800;color:#065f46;background:#f0fdf4">− ${receivedNow.toLocaleString()}</td></tr>
+          <tr><td style="padding:6px 8px;border:1px solid #e2e8f0;font-weight:800;color:${feeRemainingAmt(f)>0?'#b91c1c':'#065f46'}">${feeRemainingAmt(f)>0?'Balance still due on this fee':'Balance — fully settled'}</td><td style="padding:6px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:800;color:${feeRemainingAmt(f)>0?'#b91c1c':'#065f46'}">${feeRemainingAmt(f).toLocaleString()}</td></tr>
+        </tbody>
+      </table>`:''}
 
       <!-- AMOUNT RECEIVED / OUTSTANDING CALLOUT -->
       <div style="display:flex;gap:12px;margin-bottom:16px">
@@ -4772,9 +5379,7 @@ function printVoucher(idx){
   const academicYear = getAcademicYear();
   const expiryObj    = new Date(todayRaw); expiryObj.setDate(expiryObj.getDate()+30);
   const expiryFmt    = fmtDate(expiryObj);
-  const breakdown    = getFeeBreakdown(f.amt);
 
-  const qrPayload = `VCH:${voucherNo}|ROLL:${stu.roll}|AMT:${f.amt}|DUE:${f.dueDate||''}`;
   // QR is generated locally in-browser (via the QRCode library loaded in this
   // document's <head>) instead of fetching an image from a third-party API —
   // that external call has no offline fallback: if the school network is
@@ -4782,6 +5387,8 @@ function printVoucher(idx){
   // load. Generating it client-side means the voucher — including the
   // downloaded standalone HTML copy — always shows a QR with no live network
   // dependency at print time, and no student data is sent to an outside site.
+  // (The payload itself is built after grandTotal below, so it carries the
+  // amount actually being demanded rather than the original billed figure.)
 
   const isInstalment = !!(f.isInstalment && f.instTotal);
 
@@ -4793,10 +5400,16 @@ function printVoucher(idx){
   // voucher. (These are informational on the voucher only — the actual
   // amounts still get applied/settled for real via Apply Late Fee / the
   // fee-collection flow, not just by printing this voucher.)
-  const voucherLateFee = (f.status==='Overdue' && !f.lateFeeApplied) ? suggestedLateFee(f.amt) : 0;
+  const feeSt = feeComputeStatus(f);
+  const alreadyPaid = feePaidAmt(f);
+  const stillOwed = feeRemainingAmt(f);
+  const voucherLateFee = (feeSt.indexOf('Overdue')>=0 && !f.lateFeeApplied) ? suggestedLateFee(stillOwed||f.amt) : 0;
   const voucherFines = checkPendingFines(f.roll); // {sum, list}
   const extraChargesTotal = voucherLateFee + voucherFines.sum;
-  const grandTotal = f.amt + extraChargesTotal;
+  // What the student must actually hand over: the unpaid balance (NOT the full
+  // billed amount — a part-payment may already be on record) plus the extras.
+  const grandTotal = stillOwed + extraChargesTotal;
+  const qrPayload = `VCH:${voucherNo}|ROLL:${stu.roll}|AMT:${grandTotal}|DUE:${f.dueDate||''}`;
 
   // Late fee already baked into f.amt (via Apply Late Fee) — split it back out
   // so it still shows as its own line item on the voucher instead of being
@@ -4805,9 +5418,12 @@ function printVoucher(idx){
   // Bulk-assigned fees (Lab Fee, Sports Fee, etc.) that got merged into this
   // voucher — split those back out too, same idea as the late fee above, so
   // each one shows as its own row instead of being hidden inside the total.
+  // These are listed at their GROSS value; the discount comes off once, on its
+  // own credit line, so the student can see what the relief saved them.
   const mergedExtraFees = f.extraFees||[];
-  const mergedExtraFeesTotal = mergedExtraFees.reduce((a,e)=>a+(e.amt||0),0);
-  const baseComponentAmt = f.amt - appliedLateFeeAmt - mergedExtraFeesTotal;
+  const mergedExtraFeesTotal = mergedExtraFees.reduce((a,e)=>a+(e.grossAmt||e.amt||0),0);
+  const voucherRelief = feeDiscountAmt(f);
+  const baseComponentAmt = feeGrossAmt(f) - appliedLateFeeAmt - mergedExtraFeesTotal;
 
   // Label for the base row — once extraFees exist, f.category has already
   // been overwritten with the merged/concatenated string (e.g. "Lab Fee"),
@@ -4839,14 +5455,23 @@ function printVoucher(idx){
   // no longer hidden inside one lump "Tuition Fee" number.
   let instBreakdownRows = `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#334155">${baseLabel}${f.instPart?' — Instalment '+f.instPart:''}</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#1a3a2a">${baseComponentAmt.toLocaleString()}</td></tr>`;
   mergedExtraFees.forEach(ex=>{
-    instBreakdownRows += `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#0e5c8c">📦 ${ex.category}</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#0e5c8c">${(ex.amt||0).toLocaleString()}</td></tr>`;
+    instBreakdownRows += `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#0e5c8c">📦 ${ex.category}</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#0e5c8c">${(ex.grossAmt||ex.amt||0).toLocaleString()}</td></tr>`;
   });
   if(appliedLateFeeAmt>0){
     instBreakdownRows += `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#b91c1c">⚠ Late Fee Penalty (${D.settings.lateFeePct}% — Applied)</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#b91c1c">${appliedLateFeeAmt.toLocaleString()}</td></tr>`;
   }
+  if(feeScholarshipAmt(f)>0){
+    instBreakdownRows += `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#15803d">🎓 Less — ${f.scholarshipLabel||'Scholarship'}</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${feeScholarshipAmt(f).toLocaleString()}</td></tr>`;
+  }
+  if(feeConcessionAmt(f)>0){
+    instBreakdownRows += `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#15803d">🎓 Less — Concession${f.discountReason?' ('+f.discountReason+')':''}</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${feeConcessionAmt(f).toLocaleString()}</td></tr>`;
+  }
   instBreakdownRows += extraChargesRows; // suggested (not-yet-applied) late fee + disciplinary fines
+  if(alreadyPaid>0){
+    instBreakdownRows += `<tr><td style="padding:6px 10px;border:1px solid #e2e8f0;color:#15803d">✔ Less — already received${f.date&&f.date!=='-'?' (last payment '+f.date+')':''}</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${alreadyPaid.toLocaleString()}</td></tr>`;
+  }
 
-  const instBreakdownTable = (mergedExtraFees.length>0 || appliedLateFeeAmt>0 || extraChargesTotal>0) ? `
+  const instBreakdownTable = (mergedExtraFees.length>0 || appliedLateFeeAmt>0 || extraChargesTotal>0 || voucherRelief>0 || alreadyPaid>0) ? `
         <table style="width:100%;border-collapse:collapse;margin-bottom:10px;font-family:Arial,sans-serif">
           <thead>
             <tr style="background:#f8fafc">
@@ -4856,17 +5481,19 @@ function printVoucher(idx){
           </thead>
           <tbody style="font-family:Arial,sans-serif;font-size:11.5px">
             ${instBreakdownRows}
-            <tr><td style="padding:7px 10px;border:1px solid #e2e8f0;font-weight:800;color:#0d3b1e;background:#f0fdf4">TOTAL — This Challan</td><td style="padding:7px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:800;color:#0d3b1e;background:#f0fdf4">${grandTotal.toLocaleString()}</td></tr>
+            <tr><td style="padding:7px 10px;border:1px solid #e2e8f0;font-weight:800;color:#0d3b1e;background:#f0fdf4">${alreadyPaid>0?'BALANCE NOW PAYABLE':'TOTAL — This Challan'}</td><td style="padding:7px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:800;color:#0d3b1e;background:#f0fdf4">${grandTotal.toLocaleString()}</td></tr>
           </tbody>
         </table>` : '';
 
-  let allInst=[], paidCount=0, totalCount=0, paidAmt=0, remainAmt=0;
+  let allInst=[], paidCount=0, totalCount=0, paidAmt=0, remainAmt=0, planTotal=0;
   if(isInstalment){
-    allInst    = instPlanRows(f);
-    paidCount  = allInst.filter(x=>feeComputeStatus(x)==='Paid').length;
-    totalCount = allInst.length;
-    paidAmt    = allInst.reduce((a,b)=>a+feePaidAmt(b),0);
-    remainAmt  = f.instTotal - paidAmt;
+    const plan   = instPlanSummary(f);
+    allInst    = plan.rows;
+    paidCount  = plan.paidCount;
+    totalCount = plan.rows.length;
+    paidAmt    = plan.totalPaid;
+    planTotal  = plan.totalFee;
+    remainAmt  = plan.totalRemaining;
   }
 
   /* ── Instalment schedule rows ── */
@@ -4875,21 +5502,23 @@ function printVoucher(idx){
     allInst.forEach((inst, i) => {
       const instDue = inst.dueDate ? parseDate(inst.dueDate) : null;
       if(instDue) instDue.setHours(0,0,0,0);
-      const iOvr    = instDue && instDue < todayClean && inst.status !== 'Paid';
-      const isPaid  = inst.status === 'Paid';
+      const instSt  = feeComputeStatus(inst);
+      const isPaid  = instSt === 'Paid';
+      const iOvr    = !isPaid && instSt.indexOf('Overdue') >= 0;
+      const iPart   = instSt.indexOf('Partial') === 0;
       const thisPart= inst === f;
       const partNum = inst.instPart || `${i+1}/${totalCount}`;
       scheduleRows += `
         <tr style="background:${isPaid?'#f0fdf4':iOvr?'#fff5f5':thisPart?'#fffbeb':'#fff'};">
           <td style="padding:5px 8px;border-bottom:1px solid #e8ecef;text-align:center;font-size:11px;font-weight:${thisPart?'800':'600'};color:#1a3a2a">${partNum}</td>
           <td style="padding:5px 8px;border-bottom:1px solid #e8ecef;font-size:11px;color:#374151">${fmtDate(instDue)}</td>
-          <td style="padding:5px 8px;border-bottom:1px solid #e8ecef;text-align:right;font-size:11px;font-weight:700;color:#1a3a2a">Rs ${inst.amt.toLocaleString()}</td>
+          <td style="padding:5px 8px;border-bottom:1px solid #e8ecef;text-align:right;font-size:11px;font-weight:700;color:#1a3a2a">Rs ${(Number(inst.amt)||0).toLocaleString()}${iPart?`<div style="font-size:9px;font-weight:600;color:#92400e">Rs ${feePaidAmt(inst).toLocaleString()} paid · Rs ${feeRemainingAmt(inst).toLocaleString()} due</div>`:''}</td>
           <td style="padding:5px 8px;border-bottom:1px solid #e8ecef;text-align:center">
             <span style="font-size:9px;font-weight:800;padding:2px 8px;border-radius:3px;letter-spacing:.5px;
               background:${isPaid?'#d1fae5':iOvr?'#fee2e2':'#fef3c7'};
               color:${isPaid?'#065f46':iOvr?'#991b1b':'#92400e'};
               border:1px solid ${isPaid?'#a7f3d0':iOvr?'#fca5a5':'#fde68a'}">
-              ${isPaid?'PAID':iOvr?'OVERDUE':'PENDING'}
+              ${isPaid?'PAID':iPart?(iOvr?'PART · OVERDUE':'PART PAID'):iOvr?'OVERDUE':'PENDING'}
             </span>
             ${thisPart?'<span style="font-size:9px;font-weight:800;color:#1d4ed8;margin-left:4px">▶ THIS</span>':''}
           </td>
@@ -5014,13 +5643,13 @@ function printVoucher(idx){
         <div style="font-size:8px;font-weight:600;color:#64748b;margin-top:3px;letter-spacing:.3px;text-transform:uppercase">Balance Remaining</div>
       </div>
       <div style="flex:1;background:#eff6ff;border-radius:10px;padding:10px;text-align:center">
-        <div style="font-size:13px;font-weight:800;color:#1d4ed8;line-height:1">Rs ${f.instTotal.toLocaleString()}</div>
+        <div style="font-size:13px;font-weight:800;color:#1d4ed8;line-height:1">Rs ${planTotal.toLocaleString()}</div>
         <div style="font-size:8px;font-weight:600;color:#64748b;margin-top:3px;letter-spacing:.3px;text-transform:uppercase">Total Annual Fee</div>
       </div>
     </div>
     <!-- Progress bar -->
     <div style="background:#e2e8f0;border-radius:20px;height:6px;margin-bottom:12px;overflow:hidden">
-      <div style="height:100%;width:${Math.round((paidAmt/(f.instTotal||1))*100)}%;background:linear-gradient(90deg,#047857,#34d399);border-radius:20px"></div>
+      <div style="height:100%;width:${Math.round((paidAmt/(planTotal||1))*100)}%;background:linear-gradient(90deg,#047857,#34d399);border-radius:20px"></div>
     </div>
     <!-- Schedule Table -->
     <table style="width:100%;border-collapse:collapse;margin-bottom:14px;font-size:11px">
@@ -5045,18 +5674,21 @@ function printVoucher(idx){
       </thead>
       <tbody style="font-size:12px">
         <tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#334155">🎓 ${baseLabel}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:${ink};font-weight:600">${baseComponentAmt.toLocaleString()}</td></tr>
-        ${mergedExtraFees.map(ex=>`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#0e5c8c">📦 ${ex.category}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#0e5c8c;font-weight:700">${(ex.amt||0).toLocaleString()}</td></tr>`).join('')}
+        ${mergedExtraFees.map(ex=>`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#0e5c8c">📦 ${ex.category}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#0e5c8c;font-weight:700">${(ex.grossAmt||ex.amt||0).toLocaleString()}</td></tr>`).join('')}
         ${appliedLateFeeAmt>0?`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c">⚠ Late Fee Penalty (${D.settings.lateFeePct}% — Applied)</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#b91c1c;font-weight:700">${appliedLateFeeAmt.toLocaleString()}</td></tr>`:''}
+        ${feeScholarshipAmt(f)>0?`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#15803d">🎓 Less — ${f.scholarshipLabel||'Scholarship'}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#15803d;font-weight:700">− ${feeScholarshipAmt(f).toLocaleString()}</td></tr>`:''}
+        ${feeConcessionAmt(f)>0?`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#15803d">🎓 Less — Concession${f.discountReason?' ('+f.discountReason+')':''}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#15803d;font-weight:700">− ${feeConcessionAmt(f).toLocaleString()}</td></tr>`:''}
         ${voucherLateFee>0?`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c">⚠ Late Fee Penalty (${D.settings.lateFeePct}% — Overdue)</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#b91c1c;font-weight:700">${voucherLateFee.toLocaleString()}</td></tr>`:''}
         ${voucherFines.list.map(fine=>`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#b91c1c">🚨 Disciplinary Fine — ${fine.reason}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#b91c1c;font-weight:700">${fine.amt.toLocaleString()}</td></tr>`).join('')}
+        ${alreadyPaid>0?`<tr><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#15803d">✔ Less — already received${f.date&&f.date!=='-'?' (last payment '+f.date+')':''}</td><td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#15803d;font-weight:700">− ${alreadyPaid.toLocaleString()}</td></tr>`:''}
         <tr>
-          <td style="padding:9px 10px;font-size:12px;font-weight:700;color:${ink};background:#f8fafc;border-radius:0 0 0 8px">TOTAL — ${f.sem||'—'}</td>
+          <td style="padding:9px 10px;font-size:12px;font-weight:700;color:${ink};background:#f8fafc;border-radius:0 0 0 8px">${alreadyPaid>0?'BALANCE DUE':'TOTAL'} — ${f.sem||'—'}</td>
           <td style="padding:9px 10px;font-size:13px;font-weight:800;color:${stripeClr};text-align:right;background:#f8fafc;border-radius:0 0 8px 0">${grandTotal.toLocaleString()}</td>
         </tr>
       </tbody>
     </table>
     <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
-      <span style="background:${stripeSoft};color:${stripeClr};padding:4px 10px;border-radius:20px;font-size:9.5px;font-weight:700">FULL PAYMENT</span>
+      <span style="background:${stripeSoft};color:${stripeClr};padding:4px 10px;border-radius:20px;font-size:9.5px;font-weight:700">${alreadyPaid>0?'BALANCE PAYMENT':'FULL PAYMENT'}</span>
       <span style="font-size:10px;color:#64748b;align-self:center">Issue: <strong style="color:${ink}">${todayFmt}</strong></span>
       <span style="font-size:10px;color:#64748b;align-self:center">Due: <strong style="color:${isOverdue?'#dc2626':ink}">${dueFmt}</strong></span>
       <span style="font-size:10px;color:#b45309;align-self:center;font-weight:600">⚠ Expires ${expiryFmt}</span>
@@ -5068,17 +5700,19 @@ function printVoucher(idx){
     <!-- AMOUNT BOX -->
     <div style="border-radius:14px;overflow:hidden;margin-bottom:14px;background:linear-gradient(135deg,${brandDeep},${brand})">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 16px">
-        <div style="font-size:9.5px;font-weight:700;color:rgba(255,255,255,.8);letter-spacing:1px;text-transform:uppercase">${isInstalment?'Amount Due — This Challan':'Total Amount Due'}${extraChargesTotal>0?' (incl. late fee / fine)':''}</div>
+        <div style="font-size:9.5px;font-weight:700;color:rgba(255,255,255,.8);letter-spacing:1px;text-transform:uppercase">${alreadyPaid>0?'Balance Now Due':isInstalment?'Amount Due — This Challan':'Total Amount Due'}${extraChargesTotal>0?' (incl. late fee / fine)':''}</div>
       </div>
       <div style="display:flex;align-items:center;padding:6px 16px 16px;gap:16px">
         <div style="flex:1">
           <div style="font-size:32px;font-weight:800;color:#fff;line-height:1;letter-spacing:-.5px">Rs ${grandTotal.toLocaleString()}</div>
           <div style="font-size:10px;color:rgba(255,255,255,.65);margin-top:5px">${amountInWords(grandTotal)}</div>
+          ${alreadyPaid>0?`<div style="font-size:9.5px;color:#bbf7d0;margin-top:4px;font-weight:700">Rs ${alreadyPaid.toLocaleString()} already received against this challan of Rs ${(Number(f.amt)||0).toLocaleString()}</div>`:''}
+          ${voucherRelief>0?`<div style="font-size:9.5px;color:#bbf7d0;margin-top:4px;font-weight:700">After Rs ${voucherRelief.toLocaleString()} relief on Rs ${feeGrossAmt(f).toLocaleString()}${f.scholarshipLabel?' — '+f.scholarshipLabel:''}</div>`:''}
           ${extraChargesTotal>0?`<div style="font-size:9.5px;color:#fecaca;margin-top:4px;font-weight:700">Includes Rs ${extraChargesTotal.toLocaleString()} in late fee / disciplinary fine (see above)</div>`:''}
         </div>
         <div style="text-align:center">
           <div style="background:rgba(255,255,255,.14);border-radius:8px;padding:7px 14px;margin-bottom:5px">
-            <div style="font-size:11px;font-weight:800;letter-spacing:2px;color:#fff">${isOverdue?'OVERDUE':'UNPAID'}</div>
+            <div style="font-size:11px;font-weight:800;letter-spacing:2px;color:#fff">${alreadyPaid>0?(isOverdue?'PART · OVERDUE':'PART PAID'):isOverdue?'OVERDUE':'UNPAID'}</div>
           </div>
           <div style="font-size:8px;color:rgba(255,255,255,.5);font-weight:600;text-transform:uppercase;letter-spacing:.5px">Office Stamp</div>
         </div>
@@ -5396,8 +6030,12 @@ function quickCollect(idx){
   $('fn').value = stu.name;
   $('fr').value = stu.roll;
   $('feeEditIdx').value = idx;
-  const collectedAmt = applyPendingFinesToFeeModal(stu.roll, f.amt);
-  $('fa').value = collectedAmt;
+  // #fa is the GROSS fee: hand it feeGrossAmt(f), not f.amt, or the student's
+  // scholarship would be deducted a second time when this is saved. Any
+  // concession already on the record is carried over as-is.
+  const fineTop = applyPendingFinesToFeeModal(stu.roll, 0);
+  feeModalLoadDiscount(f, fineTop);
+  const collectedAmt = feeModalNetAmt();
   const semEl=$('fsm');
   if(semEl){for(let i=0;i<semEl.options.length;i++){if(semEl.options[i].value===f.sem||semEl.options[i].text===f.sem){semEl.selectedIndex=i;break;}}}
   $('fdd').value = f.dueDate||'';
@@ -5414,13 +6052,20 @@ function quickCollect(idx){
   if($('fsum-amt'))  $('fsum-amt').textContent  = 'Rs '+fmt(collectedAmt);
   if($('fsum-st'))   $('fsum-st').innerHTML     = bdg('Paid');
   if($('fsum-mt'))   $('fsum-mt').textContent   = 'Cash';
-  feeShowInstPlan(f.roll, f.instTotal||null);
+  feeShowInstPlan(f.roll, f.instTotal||null, f);
   feeStep(3);
 }
 
 function printFees(){
-  const rows=D.fees.map(f=>[f.receipt||'-',f.student,f.roll,f.sem,'Rs '+f.amt.toLocaleString(),f.date,f.method,f.status]);
-  const thead='<th>Receipt</th><th>Student</th><th>Roll</th><th>Sem</th><th>Amount</th><th>Date</th><th>Method</th><th>Status</th>';
+  const rows=D.fees.map(f=>{
+    const dsc=feeDiscountAmt(f), rem=feeRemainingAmt(f);
+    return [f.receipt||'-',f.student,f.roll,f.sem,
+      'Rs '+(Number(f.amt)||0).toLocaleString()+(dsc>0?'<br><span style="font-size:9.5px;color:#20954a">after Rs '+fmt(dsc)+' relief</span>':''),
+      feePaidAmt(f)>0?'Rs '+fmt(feePaidAmt(f)):'—',
+      rem>0?'Rs '+fmt(rem):'—',
+      f.date,f.method,feeStatusLabel(feeComputeStatus(f))];
+  });
+  const thead='<th>Receipt</th><th>Student</th><th>Roll</th><th>Sem</th><th>Payable</th><th>Paid</th><th>Balance</th><th>Date</th><th>Method</th><th>Status</th>';
   const body=rows.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join('');
   const h='<html><head><meta charset="UTF-8"><style>*{box-sizing:border-box;}body{font-family:Arial,sans-serif;padding:22px;}h2{color:#1a6636;font-size:18px;margin-bottom:6px;}.inf{font-size:12px;color:#666;margin-bottom:12px;}table{width:100%;border-collapse:collapse;}th{background:#1a6636;color:#fff;padding:7px 9px;text-align:left;font-size:11px;}td{padding:7px 9px;border-bottom:1px solid #e0e0e0;font-size:12px;}tr:nth-child(even)td{background:#f5faf6;}@media print{.np{display:none;}}</style></head><body><h2>'+D.settings.instName+' - Fee Records</h2><div class="inf">Generated: '+new Date().toLocaleString()+' | Total: '+D.fees.length+'</div><table><thead><tr>'+thead+'</tr></thead><tbody>'+body+'</tbody></table><div class="np" style="margin-top:12px"><button onclick="window.print()" style="padding:7px 16px;background:#1a6636;color:#fff;border:none;border-radius:6px;cursor:pointer;">Print</button></div></body></html>';
   showPrintPreview(h,'Fee Records');
@@ -6619,8 +7264,12 @@ function rpShow(type){
       const boysInter  = D.students.filter(s=>s.gender==='Male'&&(s.cls||'').startsWith('Inter-'));
       const girlsInter = D.students.filter(s=>s.gender==='Female'&&(s.cls||'').startsWith('Inter-'));
       const bsStu      = D.students.filter(s=>!(s.cls||'').startsWith('Inter-'));
-      const feeCollFor = (stuArr)=>filteredFees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&stuArr.includes(s)&&f.status==='Paid';}).reduce((a,b)=>a+b.amt,0);
-      const feeBillFor = (stuArr)=>stuArr.reduce((a,b)=>a+b.fee,0);
+      const feeCollFor = (stuArr)=>filteredFees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+feePaidAmt(b),0);
+      // Billed from the actual fee records (NET, i.e. after any scholarship or
+      // concession) — not from the gross sticker figure s.fee. Mixing the two
+      // made these sections exceed the Overall Summary by the total relief and
+      // left a phantom "pending" balance for every discounted student.
+      const feeBillFor = (stuArr)=>filteredFees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+b.amt,0);
       // Transport Fee also belongs to boys and girls both, so split it the
       // same way (matched by roll) instead of leaving it out of this report.
       const tfCollFor = (stuArr)=>filteredTransportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&stuArr.includes(s)&&t.status==='Paid';}).reduce((a,b)=>a+b.amt,0);
@@ -6646,7 +7295,7 @@ function rpShow(type){
         row('Total Billed (incl. Transport)','Rs '+fmt(filteredFees.reduce((a,b)=>a+b.amt,0)+filteredTransportFees.reduce((a,b)=>a+b.amt,0)))+
         row('Collected','<span class="pos">Rs '+fmt(income)+'</span>')+
         row('— of which Transport Fee','Rs '+fmt(filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0)))+
-        row('Pending/Overdue','<span class="neg">Rs '+fmt(filteredFees.filter(f=>f.status!=='Paid').reduce((a,b)=>a+b.amt,0)+filteredTransportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0))+'</span>');
+        row('Pending/Overdue','<span class="neg">Rs '+fmt(filteredFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+filteredTransportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0))+'</span>');
     })(),
     salary:(()=>{
       const net=s=>netPay(s);
@@ -6902,7 +7551,7 @@ function rpShow(type){
       // ── 2. Income Breakdown (Fee Collection) ──
       h+=secHead('💳 Income Breakdown (Fee Collection)');
       const feeBilled=filteredFees.reduce((a,b)=>a+b.amt,0)+filteredTransportFees.reduce((a,b)=>a+b.amt,0);
-      const feePending=filteredFees.filter(f=>f.status!=='Paid').reduce((a,b)=>a+b.amt,0)+filteredTransportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0);
+      const feePending=filteredFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+filteredTransportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0);
       const collRate=feeBilled>0?(income/feeBilled*100):0;
       h+=row('Fee Billed (incl. Transport)','Rs '+fmt(feeBilled));
       h+=row('Fee Collected','<span class="pos">Rs '+fmt(income)+'</span>');
@@ -6941,17 +7590,25 @@ function rpShow(type){
         if(isNaN(d.getTime()))return null;
         return d.toLocaleString('default',{month:'short',year:'numeric'});
       }
-      function bSalLabel(mStr){
-        if(!mStr)return null;
-        var d=new Date('1 '+mStr);
-        return isNaN(d.getTime())?null:d.toLocaleString('default',{month:'short',year:'numeric'});
-      }
+      // bMLabel handles the 'Mon YYYY' salary month too — callers prefix '1 '.
       const bMMap={};
-      filteredFees.forEach(f=>{var amt=feePaidAmt(f);if(!amt)return;var m=bMLabel(f.date);if(m){bMMap[m]=bMMap[m]||{inc:0,exp:0};bMMap[m].inc+=amt;}});
-      filteredTransportFees.filter(t=>t.status==='Paid').forEach(t=>{var m=bMLabel(t.date);if(m){bMMap[m]=bMMap[m]||{inc:0,exp:0};bMMap[m].inc+=t.amt;}});
-      filteredExpenses.forEach(e=>{var m=bMLabel(e.date);if(m){bMMap[m]=bMMap[m]||{inc:0,exp:0};bMMap[m].exp+=e.amt;}});
-      filteredSalaries.filter(s=>s.status==='Paid').forEach(s=>{var m=bSalLabel(s.month);if(m){bMMap[m]=bMMap[m]||{inc:0,exp:0};bMMap[m].exp+=(netPay(s));}});
-      const bMKeys=Object.keys(bMMap).sort((a,b)=>new Date('1 '+a)-new Date('1 '+b));
+      // Cash lands in the month it was RECEIVED — feePaidByReceipt() walks the
+      // payment log and falls back to the record date only for what the log
+      // doesn't cover. Every bucket also remembers a real timestamp so the rows
+      // sort chronologically without re-parsing the localised label (which is
+      // unparseable under a non-English locale, silently leaving Apr before Dec).
+      const bMBucket=(dateStr)=>{
+        const lbl=bMLabel(dateStr); if(!lbl) return null;
+        const d=txParseDate(dateStr), ts=d?d.getTime():0;
+        if(!bMMap[lbl]) bMMap[lbl]={inc:0,exp:0,ts:ts};
+        else if(ts&&(!bMMap[lbl].ts||ts<bMMap[lbl].ts)) bMMap[lbl].ts=ts;
+        return bMMap[lbl];
+      };
+      filteredFees.forEach(f=>feePaidByReceipt(f,(amt,ds)=>{const b=bMBucket(ds);if(b)b.inc+=amt;}));
+      filteredTransportFees.filter(t=>t.status==='Paid').forEach(t=>{const b=bMBucket(t.date);if(b)b.inc+=t.amt;});
+      filteredExpenses.forEach(e=>{const b=bMBucket(e.date);if(b)b.exp+=e.amt;});
+      filteredSalaries.filter(s=>s.status==='Paid').forEach(s=>{const b=s.month?bMBucket('1 '+s.month):null;if(b)b.exp+=netPay(s);});
+      const bMKeys=Object.keys(bMMap).sort((a,b)=>bMMap[a].ts-bMMap[b].ts);
       if(bMKeys.length){
         bMKeys.forEach(m=>{
           const inc=bMMap[m].inc, exp=bMMap[m].exp, netM=inc-exp;
@@ -6975,7 +7632,7 @@ function rpShow(type){
       const boysInter = D.students.filter(s=>s.gender==='Male'&&(s.cls||'').startsWith('Inter-'));
       const girlsInter= D.students.filter(s=>s.gender==='Female'&&(s.cls||'').startsWith('Inter-'));
       const bsStu     = D.students.filter(s=>!(s.cls||'').startsWith('Inter-'));
-      const stuRow = s=>row(s.name+' — '+(s.cls||'').replace('Inter-','')+' ('+s.roll+')',bdg(s.status));
+      const stuRow = s=>row(s.name+' — '+(s.cls||'').replace('Inter-','')+' ('+s.roll+')',bdg(studentFeeStatus(s)));
       return secHead('Intermediate — Boys ('+boysInter.length+')')+(boysInter.map(stuRow).join('')||row('No students','—'))+
              secHead('Intermediate — Girls ('+girlsInter.length+')')+(girlsInter.map(stuRow).join('')||row('No students','—'))+
              secHead("Bachelor's / MS — Boys + Girls Combined ("+bsStu.length+')')+(bsStu.map(stuRow).join('')||row('No students','—'));
@@ -7007,9 +7664,13 @@ function rpShow(type){
       const bsStu=D.students.filter(s=>!(s.cls||'').startsWith('Inter-'));
 
       // ── Fee numbers (includes Transport Fee — real college income) ──
-      const feeBilled=D.students.reduce((a,s)=>a+s.fee,0)+filteredTransportFees.reduce((a,b)=>a+b.amt,0);
+      // Billed comes from the fee records (NET of any relief) so that
+      // Billed = Collected + Pending always holds. Summing the gross s.fee here
+      // broke that identity for every scholarship student and understated the
+      // collection rate.
+      const feeBilled=filteredFees.reduce((a,b)=>a+b.amt,0)+filteredTransportFees.reduce((a,b)=>a+b.amt,0);
       const feeCollected=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
-      const feePending=filteredFees.filter(f=>f.status!=='Paid').reduce((a,b)=>a+b.amt,0)+filteredTransportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0);
+      const feePending=filteredFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+filteredTransportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0);
       const collRate=feeBilled>0?(feeCollected/feeBilled*100):0;
 
       // ── Salary numbers ──
@@ -7031,18 +7692,27 @@ function rpShow(type){
 
       // ── Month-wise breakdown ──
       const mMap={};
-      filteredFees.forEach(f=>{
-        var amt=feePaidAmt(f);if(!amt)return;
-        var m=mLabel(f.date);if(m){mMap[m]=mMap[m]||{inc:0,exp:0};mMap[m].inc+=amt;}
-      });
+      // Money belongs to the month it was actually RECEIVED, not the month the fee
+      // record was raised — feePaidByReceipt() walks the payment log and falls back
+      // to the record date only for what the log doesn't cover. Each bucket keeps a
+      // real timestamp so the rows sort chronologically without re-parsing the
+      // localised label (unparseable under a non-English locale — Apr before Dec).
+      const mBucket=(dateStr)=>{
+        const lbl=mLabel(dateStr); if(!lbl) return null;
+        const d=txParseDate(dateStr), ts=d?d.getTime():0;
+        if(!mMap[lbl]) mMap[lbl]={inc:0,exp:0,ts:ts};
+        else if(ts&&(!mMap[lbl].ts||ts<mMap[lbl].ts)) mMap[lbl].ts=ts;
+        return mMap[lbl];
+      };
+      filteredFees.forEach(f=>feePaidByReceipt(f,(amt,ds)=>{const b=mBucket(ds);if(b)b.inc+=amt;}));
       filteredTransportFees.filter(t=>t.status==='Paid').forEach(t=>{
-        var m=mLabel(t.date);if(m){mMap[m]=mMap[m]||{inc:0,exp:0};mMap[m].inc+=t.amt;}
+        const b=mBucket(t.date);if(b)b.inc+=t.amt;
       });
       filteredExpenses.forEach(e=>{
-        var m=mLabel(e.date);if(m){mMap[m]=mMap[m]||{inc:0,exp:0};mMap[m].exp+=e.amt;}
+        const b=mBucket(e.date);if(b)b.exp+=e.amt;
       });
       filteredSalaries.filter(s=>s.status==='Paid').forEach(s=>{
-        var m=salLabel(s.month);if(m){mMap[m]=mMap[m]||{inc:0,exp:0};mMap[m].exp+=(netPay(s));}
+        const b=s.month?mBucket('1 '+s.month):null;if(b)b.exp+=netPay(s);
       });
       const mKeys=Object.keys(mMap).sort((a,b)=>new Date('1 '+a)-new Date('1 '+b));
 
@@ -7120,8 +7790,8 @@ function rpShow(type){
     })(),
   };
   // Boys/Girls specific report data helpers
-  const feeCollFor = (stuArr) => filteredFees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&stuArr.includes(s)&&f.status==='Paid';}).reduce((a,b)=>a+b.amt,0);
-  const feeBillFor = (stuArr) => stuArr.reduce((a,b)=>a+b.fee,0);
+  const feeCollFor = (stuArr) => filteredFees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+feePaidAmt(b),0);
+  const feeBillFor = (stuArr) => filteredFees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+b.amt,0);
   // Transport Fee split the same way — it's used by boys and girls both.
   const tfCollFor2 = (stuArr) => filteredTransportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&stuArr.includes(s)&&t.status==='Paid';}).reduce((a,b)=>a+b.amt,0);
   const tfBillFor2 = (stuArr) => filteredTransportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+b.amt,0);
@@ -7130,7 +7800,7 @@ function rpShow(type){
   const boysInter  = boysStu.filter(s=>(s.cls||'').startsWith('Inter-'));
   const girlsInter = girlsStu.filter(s=>(s.cls||'').startsWith('Inter-'));
 
-  const stuRow2    = s=>row(s.name+' — '+(s.cls||'').replace('Inter-','')+' ('+s.roll+')',bdg(s.status));
+  const stuRow2    = s=>row(s.name+' — '+(s.cls||'').replace('Inter-','')+' ('+s.roll+')',bdg(studentFeeStatus(s)));
   // Inter-only Boys/Girls fee reports
   rpts['fee-boys'] =
     secHead('Intermediate — Boys ('+boysInter.length+' students)')+
@@ -7138,7 +7808,7 @@ function rpShow(type){
     row('Collected','<span class="pos">Rs '+fmt(feeCollFor(boysInter)+tfCollFor2(boysInter))+'</span>')+
     row('— of which Transport','Rs '+fmt(tfCollFor2(boysInter)))+
     row('Pending/Overdue','<span class="neg">Rs '+fmt((feeBillFor(boysInter)+tfBillFor2(boysInter))-(feeCollFor(boysInter)+tfCollFor2(boysInter)))+'</span>')+
-    row('Boys Pending Count',boysInter.filter(s=>s.status!=='Paid').length+' students')+
+    row('Boys Pending Count',boysInter.filter(s=>studentFeeStatus(s)!=='Paid').length+' students')+
     '';
   rpts['fee-girls'] =
     secHead('Intermediate — Girls ('+girlsInter.length+' students)')+
@@ -7146,7 +7816,7 @@ function rpShow(type){
     row('Collected','<span class="pos">Rs '+fmt(feeCollFor(girlsInter)+tfCollFor2(girlsInter))+'</span>')+
     row('— of which Transport','Rs '+fmt(tfCollFor2(girlsInter)))+
     row('Pending/Overdue','<span class="neg">Rs '+fmt((feeBillFor(girlsInter)+tfBillFor2(girlsInter))-(feeCollFor(girlsInter)+tfCollFor2(girlsInter)))+'</span>')+
-    row('Girls Pending Count',girlsInter.filter(s=>s.status!=='Paid').length+' students')+
+    row('Girls Pending Count',girlsInter.filter(s=>studentFeeStatus(s)!=='Paid').length+' students')+
     '';
   // Student ledger
   rpts['student-boys'] =
@@ -7389,20 +8059,25 @@ function exportReport(format){
   var headers=[], rows=[], colWidths=[];
 
   if(type==='fee'||type==='fee-boys'||type==='fee-girls'){
-    headers=['Student','Roll No','Class','Gender','Fee Billed (Rs)','Fee Paid (Rs)','Transport Paid (Rs)','Pending (Rs)','Status'];
+    headers=['Student','Roll No','Class','Gender','Fee Billed (Rs)','Discount (Rs)','Fee Paid (Rs)','Transport Paid (Rs)','Pending (Rs)','Status'];
     var stuArr=type==='fee-boys'
       ? D.students.filter(s=>s.gender==='Male'&&(s.cls||'').startsWith('Inter-'))
       : type==='fee-girls'
       ? D.students.filter(s=>s.gender==='Female'&&(s.cls||'').startsWith('Inter-'))
       : D.students;
     rows=stuArr.map(s=>{
-      var paid=filteredFees.filter(f=>f.roll===s.roll&&f.status==='Paid').reduce((a,b)=>a+b.amt,0);
+      // Billed is the NET total of this student's own fee records, so
+      // Billed − Paid equals the real balance. The old (s.fee||0) read the gross
+      // sticker figure and left every discounted student with a phantom Pending.
+      var myFees=filteredFees.filter(f=>f.roll===s.roll);
+      var paid=myFees.reduce((a,b)=>a+feePaidAmt(b),0);
+      var relief=myFees.reduce((a,b)=>a+feeDiscountAmt(b),0);
       var tfPaid=filteredTransportFees.filter(t=>t.roll===s.roll&&t.status==='Paid').reduce((a,b)=>a+b.amt,0);
       var tfBilled=filteredTransportFees.filter(t=>t.roll===s.roll).reduce((a,b)=>a+b.amt,0);
-      var billed=(s.fee||0)+tfBilled;
-      return[s.name,s.roll,s.cls||'',s.gender||'',billed,paid,tfPaid,Math.max(0,billed-paid-tfPaid),s.status];
+      var billed=myFees.reduce((a,f)=>a+(f.amt||0),0)+tfBilled;
+      return[s.name,s.roll,s.cls||'',s.gender||'',billed,relief,paid,tfPaid,Math.max(0,billed-paid-tfPaid),studentFeeStatus(s)];
     });
-    colWidths=[25,15,14,10,15,15,15,14,10];
+    colWidths=[25,15,14,10,15,13,15,15,14,10];
   } else if(type==='salary'){
     headers=['Name','Designation','Basic (Rs)','Allowance (Rs)','Deduction (Rs)','Net Pay (Rs)','Month','Status'];
     rows=filteredSalaries.map(s=>[s.name,s.desig,s.basic,s.allow,s.deduct||0,netPay(s),s.month,s.status]);
@@ -7421,14 +8096,15 @@ function exportReport(format){
     rows=[['Total Fee Income (incl. Transport)',inc],['— of which Transport Fee',tfInc],['Salary Expenditure',salExp],['Other Expenses',othExp],['Total Expenditure',salExp+othExp],['Net Balance ('+(net>=0?'Surplus':'Deficit')+')',Math.abs(net)]];
     colWidths=[35,20];
   } else if(type==='student'||type==='student-boys'||type==='student-girls'){
-    headers=['Name','Roll No','Class','Gender','Semester','Fee (Rs)','Status'];
+    headers=['Name','Roll No','Class','Gender','Semester','Fee (Rs)','Scholarship','Outstanding (Rs)','Status'];
     var stuArr2=type==='student-boys'
       ? D.students.filter(s=>s.gender==='Male'&&(s.cls||'').startsWith('Inter-'))
       : type==='student-girls'
       ? D.students.filter(s=>s.gender==='Female'&&(s.cls||'').startsWith('Inter-'))
       : D.students;
-    rows=stuArr2.map(s=>[s.name,s.roll,s.cls||'',s.gender||'',s.sem||'',s.fee||0,s.status]);
-    colWidths=[25,15,14,10,10,12,10];
+    // Derived status, not the cached s.status — see printStudents().
+    rows=stuArr2.map(s=>[s.name,s.roll,s.cls||'',s.gender||'',s.sem||'',s.fee||0,studentScholarshipLabel(s)||'-',studentOutstanding(s),studentFeeStatus(s)]);
+    colWidths=[25,15,14,10,10,12,20,16,10];
   } else if(type==='annual'){
     // Multi-section annual export
     headers=['Section','Item','Value'];
@@ -7437,7 +8113,9 @@ function exportReport(format){
     var aSal=filteredSalaries.filter(s=>s.status==='Paid').reduce((a,b)=>a+netPay(b),0);
     var aExp=filteredExpenses.reduce((a,b)=>a+b.amt,0);
     var aNet=aInc-aSal-aExp;
-    var feeBilled=D.students.reduce((a,s)=>a+s.fee,0)+filteredTransportFees.reduce((a,b)=>a+b.amt,0);
+    // Billed from the fee records (NET of relief) so the exported sheet
+    // reconciles with itself and with the on-screen annual report.
+    var feeBilled=filteredFees.reduce((a,b)=>a+b.amt,0)+filteredTransportFees.reduce((a,b)=>a+b.amt,0);
     var feeRate=feeBilled>0?((aInc/feeBilled)*100).toFixed(1)+'%':'0%';
     rows=[
       ['Enrollment','Total Students',D.students.length],
@@ -7455,22 +8133,43 @@ function exportReport(format){
     ];
     // Add month-wise rows
     var mSet={};
-    filteredFees.filter(f=>f.status==='Paid'&&f.date&&f.date!=='-').forEach(f=>{
-      var d=new Date(f.date);if(isNaN(d))return;
-      var k=d.toLocaleString('default',{month:'short',year:'numeric'});
-      mSet[k]=mSet[k]||{inc:0,exp:0};mSet[k].inc+=f.amt;
+    // One shared label helper so every stream buckets into the SAME key — the
+    // old code hand-rolled `new Date(x)` four times, which quietly dropped any
+    // date in the app's own 'DD Mon YYYY' display format on stricter parsers.
+    var mKeyOf=function(dateStr){
+      var d=txParseDate(dateStr);
+      return d?d.toLocaleString('default',{month:'short',year:'numeric'}):null;
+    };
+    var mBucket=function(key){ if(!mSet[key])mSet[key]={inc:0,exp:0}; return mSet[key]; };
+    // Money is attributed to the month it was actually received in. A part-paid
+    // record can therefore feed two different months, so we walk the logged
+    // payments first and only fall back to the record date for what they miss.
+    filteredFees.forEach(f=>{
+      var paid=feePaidAmt(f);if(paid<=0)return;
+      var logged=0;
+      feePaymentsFor(f).forEach(p=>{
+        var amt=Number(p.amount)||0;if(amt<=0)return;
+        logged+=amt;
+        var pk=mKeyOf(p.date);if(pk)mBucket(pk).inc+=amt;
+      });
+      var rest=paid-logged;
+      if(rest<=0)return;
+      var k=mKeyOf(f.date);if(k)mBucket(k).inc+=rest;
     });
-    filteredTransportFees.filter(t=>t.status==='Paid'&&t.date&&t.date!=='-').forEach(t=>{
-      var d=new Date(t.date);if(isNaN(d))return;
-      var k=d.toLocaleString('default',{month:'short',year:'numeric'});
-      mSet[k]=mSet[k]||{inc:0,exp:0};mSet[k].inc+=t.amt;
+    filteredTransportFees.filter(t=>t.status==='Paid').forEach(t=>{
+      var k=mKeyOf(t.date);if(k)mBucket(k).inc+=t.amt;
     });
     filteredExpenses.forEach(e=>{
-      var d=new Date(e.date);if(isNaN(d))return;
-      var k=d.toLocaleString('default',{month:'short',year:'numeric'});
-      mSet[k]=mSet[k]||{inc:0,exp:0};mSet[k].exp+=e.amt;
+      var k=mKeyOf(e.date);if(k)mBucket(k).exp+=e.amt;
     });
-    Object.keys(mSet).sort().forEach(m=>{
+    // Salaries are part of monthly expenditure too. Leaving them out made the
+    // monthly rows disagree with the 'Total Expenditure' row above by exactly
+    // the payroll. s.month is a 'Mon YYYY' string, so prefix a day for parsing.
+    filteredSalaries.filter(s=>s.status==='Paid').forEach(s=>{
+      var k=s.month?mKeyOf('1 '+s.month):null;if(k)mBucket(k).exp+=netPay(s);
+    });
+    // Chronological, not alphabetical — a plain .sort() put Apr before Dec.
+    Object.keys(mSet).sort((a,b)=>new Date('1 '+a)-new Date('1 '+b)).forEach(m=>{
       rows.push(['Monthly',m+' — Income (Rs)',mSet[m].inc]);
       rows.push(['Monthly',m+' — Expenses (Rs)',mSet[m].exp]);
     });
@@ -7556,7 +8255,7 @@ function viewTx(id){
   let extra=[];
   if(t.srcType==='fee'){
     const f=D.fees[t.srcIdx];
-    if(f)extra=[['Receipt No',`<code class="id-tag">${f.receipt||'-'}</code>`],['Student',f.student],['Roll Number',f.roll],['Semester',f.sem],['Method',f.method&&f.method!=='-'?f.method:'-'],['Status',bdg(f.status)]];
+    if(f)extra=[['Receipt No',`<code class="id-tag">${f.receipt||'-'}</code>`],['Student',f.student],['Roll Number',f.roll],['Semester',f.sem],['Method',f.method&&f.method!=='-'?f.method:'-'],['Status',bdg(feeStatusLabel(feeComputeStatus(f)))],['Paid / Payable',`<strong>Rs ${fmt(feePaidAmt(f))}</strong> of Rs ${fmt(f.amt)}${feeRemainingAmt(f)>0?` · <span class="neg">Rs ${fmt(feeRemainingAmt(f))} balance</span>`:''}`]];
   }else if(t.srcType==='salary'){
     const s=D.salaries[t.srcIdx];
     if(s)extra=[['Salary ID',`<code class="id-tag">${s.salId||'-'}</code>`],['Employee',s.name],['Designation',s.desig],['Department',s.dept||'-'],['Month',s.month],['Status',bdg(s.status)]];
@@ -7723,11 +8422,42 @@ let _remState = {
   log: []
 };
 
+// ── Who actually owes money ──────────────────────────────────────────────────
+// `student.status` is a cached summary that only gets rewritten when a fee is
+// saved, so it goes stale (a part-paid record used to leave it on 'Paid'). These
+// three helpers derive the truth from the fee records themselves, and every
+// reminder screen now reads them instead of the cached string.
+function studentTfRemaining(s){
+  return (D.transportFees||[]).filter(t=>t.roll===s.roll&&t.status!=='Paid')
+    .reduce((a,b)=>a+(Number(b.amt)||0),0);
+}
+function studentOutstanding(s){
+  const feePart=D.fees.filter(f=>f.roll===s.roll).reduce((a,b)=>a+feeRemainingAmt(b),0);
+  return feePart+studentTfRemaining(s);
+}
+function studentFeeStatus(s){
+  const mine=D.fees.filter(f=>f.roll===s.roll);
+  const tfMine=(D.transportFees||[]).filter(t=>t.roll===s.roll);
+  // No billing at all yet — fall back to whatever the record says so a brand-new
+  // student still appears where the clerk expects them.
+  if(!mine.length&&!tfMine.length) return s.status||'Pending';
+  const feeOwed=mine.some(f=>feeRemainingAmt(f)>0);
+  const tfOwed=tfMine.some(t=>t.status!=='Paid');
+  if(!feeOwed&&!tfOwed) return 'Paid';
+  const overdue=mine.some(f=>feeRemainingAmt(f)>0&&feeComputeStatus(f).indexOf('Overdue')>=0)
+    || tfMine.some(t=>t.status==='Overdue');
+  return overdue?'Overdue':'Pending';
+}
+function feeDefaulters(){
+  return D.students.filter(s=>studentFeeStatus(s)!=='Paid');
+}
+
 function getReminderStudents() {
   const f = _remState.filter;
   return D.students.filter(s => {
-    if (f === 'both') return s.status === 'Pending' || s.status === 'Overdue';
-    return s.status === f;
+    const st = studentFeeStatus(s);
+    if (f === 'both') return st === 'Pending' || st === 'Overdue';
+    return st === f;
   });
 }
 
@@ -7741,26 +8471,27 @@ function buildReminderTable() {
     return;
   }
   tb.innerHTML = students.map((s, i) => {
-    const fee = D.fees.find(f => f.roll === s.roll);
-    const amt = fee ? fee.amt : s.fee;
+    const st = studentFeeStatus(s);
+    const amt = getStudentDueFee(s);
     const checked = _remState.selected.has(s.roll);
-    const statusCls = s.status === 'Overdue' ? 'badge bg-r' : 'badge bg-y';
+    const statusCls = st === 'Overdue' ? 'badge bg-r' : 'badge bg-y';
+    const phone = (s.contact||'').replace(/\D/g,'');
     return `<tr id="rem-row-${i}">
-      <td><input type="checkbox" class="rem-chk" data-roll="${s.roll}" ${checked ? 'checked' : ''} onchange="reminderToggle('${s.roll}',this.checked)" style="cursor:pointer"></td>
+      <td><input type="checkbox" class="rem-chk" data-roll="${htmlEsc(s.roll)}" ${checked ? 'checked' : ''} onchange="reminderToggle('${htmlEsc(s.roll)}',this.checked)" style="cursor:pointer"></td>
       <td>
         <div style="display:flex;align-items:center;gap:8px">
-          <div style="width:28px;height:28px;border-radius:50%;background:${s.status==='Overdue'?'var(--rd)':'var(--yl)'};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">${s.name[0]}</div>
+          <div style="width:28px;height:28px;border-radius:50%;background:${st==='Overdue'?'var(--rd)':'var(--yl)'};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">${htmlEsc((s.name||'?')[0])}</div>
           <div>
-            <div style="font-size:13px;font-weight:600;color:var(--s6)">${s.name}</div>
-            <div style="font-size:11px;color:var(--s4)">${s.father||''}</div>
+            <div style="font-size:13px;font-weight:600;color:var(--s6)">${htmlEsc(s.name||'')}</div>
+            <div style="font-size:11px;color:var(--s4)">${htmlEsc(s.father||'')}</div>
           </div>
         </div>
       </td>
-      <td><code class="id-tag">${s.roll}</code></td>
-      <td style="font-size:12px">${s.cls||s.dept||''}</td>
-      <td style="font-size:12px;color:var(--bl)">${s.contact||'—'}</td>
+      <td><code class="id-tag">${htmlEsc(s.roll)}</code></td>
+      <td style="font-size:12px">${htmlEsc(s.cls||s.dept||'')}</td>
+      <td style="font-size:12px;color:${phone?'var(--bl)':'#b91c1c'}">${phone?htmlEsc(s.contact):'⚠️ no number'}</td>
       <td style="font-weight:700;color:var(--rd)">Rs ${fmt(amt)}</td>
-      <td><span class="${statusCls}">${s.status}</span></td>
+      <td><span class="${statusCls}">${st}</span></td>
     </tr>`;
   }).join('');
   updateRemSummary();
@@ -7807,22 +8538,16 @@ function setReminderTemplate(key) {
   if (ta) ta.value = getRemTemplate(key);
 }
 
-// Returns the amount actually due for a student — prefers a fee record whose
-// status matches the student's own status (Pending/Overdue), falling back to
-// any unpaid record, then to the student's base fee. Using D.fees.find() by
-// roll alone (the old approach) could return a Paid installment's amount
-// instead of the real due amount when a student has multiple fee/instalment
-// records.
+// Returns the amount actually still owed by a student: the unpaid balance of
+// every fee record (so a Rs 20,000 fee with Rs 5,000 already received reminds
+// for Rs 15,000, not Rs 20,000) plus any unpaid Transport Fee, which is tracked
+// in a separate array. Falls back to the student's base fee only when nothing
+// has been billed yet.
 function getStudentDueFee(student){
-  const own = D.fees.filter(f=>f.roll===student.roll && f.status===student.status);
-  if(own.length) return own.reduce((a,b)=>a+b.amt,0);
-  const unpaid = D.fees.filter(f=>f.roll===student.roll && f.status!=='Paid');
-  if(unpaid.length) return unpaid.reduce((a,b)=>a+b.amt,0);
-  // Tuition fee is fully settled — but the student may still owe Transport
-  // Fee, which is tracked separately and wouldn't show up above.
-  const unpaidTf = D.transportFees.filter(t=>t.roll===student.roll && t.status!=='Paid');
-  if(unpaidTf.length) return unpaidTf.reduce((a,b)=>a+b.amt,0);
-  return student.fee;
+  const owed=studentOutstanding(student);
+  if(owed>0) return owed;
+  const billed=D.fees.some(f=>f.roll===student.roll)||(D.transportFees||[]).some(t=>t.roll===student.roll);
+  return billed?0:(Number(student.fee)||0);
 }
 
 function buildMessage(student, template) {
@@ -7832,7 +8557,7 @@ function buildMessage(student, template) {
     .replace(/{roll}/g, student.roll)
     .replace(/{amount}/g, fmt(amt))
     .replace(/{program}/g, student.cls || student.dept || '')
-    .replace(/{status}/g, student.status);
+    .replace(/{status}/g, studentFeeStatus(student));
 }
 
 function openReminderModal(channel) {
@@ -7841,6 +8566,7 @@ function openReminderModal(channel) {
   const template = ($('rem-template') || {}).value || getRemTemplate('english');
   const selStudents = D.students.filter(s => _remState.selected.has(s.roll));
   const totalAmt = selStudents.reduce((a, s) => a + getStudentDueFee(s), 0);
+  const noPhone = selStudents.filter(s => !(s.contact||'').replace(/\D/g,''));
 
   if($('rem-modal-title')) $('rem-modal-title').textContent = channel === 'whatsapp' ? '📱 WhatsApp Reminder Preview' : '💬 SMS Reminder Preview';
   if($('rem-modal-cnt')) $('rem-modal-cnt').textContent = selStudents.length;
@@ -7853,13 +8579,17 @@ function openReminderModal(channel) {
 
   // Recipients list
   if($('rem-modal-list'))
-    $('rem-modal-list').innerHTML = selStudents.map((s,i) => {
+    $('rem-modal-list').innerHTML =
+      (noPhone.length?`<div style="background:#fff1f1;border-bottom:1px solid #fca5a5;color:#b91c1c;font-size:12px;padding:9px 12px">⚠️ ${noPhone.length} selected student${noPhone.length!==1?'s have':' has'} no contact number and will be skipped: ${htmlEsc(noPhone.slice(0,4).map(s=>s.name).join(', '))}${noPhone.length>4?' +'+(noPhone.length-4)+' more':''}</div>`:'')
+      + selStudents.map((s,i) => {
       const amt=getStudentDueFee(s);
-      return `<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:${i<selStudents.length-1?'1px solid var(--s1)':'none'}">
-        <div style="width:26px;height:26px;border-radius:50%;background:${s.status==='Overdue'?'var(--rd)':'var(--yl)'};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0">${s.name[0]}</div>
+      const st=studentFeeStatus(s);
+      const phone=(s.contact||'').replace(/\D/g,'');
+      return `<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:${i<selStudents.length-1?'1px solid var(--s1)':'none'};${phone?'':'opacity:.6'}">
+        <div style="width:26px;height:26px;border-radius:50%;background:${st==='Overdue'?'var(--rd)':'var(--yl)'};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0">${htmlEsc((s.name||'?')[0])}</div>
         <div style="flex:1;min-width:0">
-          <div style="font-size:13px;font-weight:600;color:var(--s6)">${s.name}</div>
-          <div style="font-size:11px;color:var(--s4)">${s.contact||'No contact'} · ${s.roll}</div>
+          <div style="font-size:13px;font-weight:600;color:var(--s6)">${htmlEsc(s.name||'')}</div>
+          <div style="font-size:11px;color:${phone?'var(--s4)':'#b91c1c'}">${phone?htmlEsc(s.contact):'⚠️ No contact — will be skipped'} · ${htmlEsc(s.roll)}</div>
         </div>
         <div style="font-size:12px;font-weight:700;color:var(--rd);flex-shrink:0">Rs ${fmt(amt)}</div>
       </div>`;
@@ -7882,7 +8612,15 @@ function sendBulkReminder(channel) {
 function confirmSendReminders() {
   const channel = _remState.channel;
   const template = ($('rem-template') || {}).value || getRemTemplate('english');
-  const selStudents = D.students.filter(s => _remState.selected.has(s.roll));
+  const picked = D.students.filter(s => _remState.selected.has(s.roll));
+  // A blank/garbage contact used to produce a wa.me link with no number, which
+  // silently opens an empty WhatsApp tab. Skip those and say so instead.
+  const selStudents = picked.filter(s => (s.contact||'').replace(/\D/g,'').length >= 7);
+  const skipped = picked.length - selStudents.length;
+  if (!selStudents.length) {
+    toast('❌ None of the selected students has a usable contact number — add numbers in Students first');
+    return;
+  }
 
   if (channel === 'whatsapp') {
     // Open WhatsApp links one by one (opens in new tabs/app)
@@ -7940,13 +8678,15 @@ function confirmSendReminders() {
   }
 
   closeMo('reminderPreview');
-  toast('✅ ' + selStudents.length + ' reminder' + (selStudents.length!==1?'s':'')+' sent via ' + (channel==='whatsapp'?'WhatsApp':'SMS') + '!');
+  toast('✅ ' + selStudents.length + ' reminder' + (selStudents.length!==1?'s':'')+' sent via ' + (channel==='whatsapp'?'WhatsApp':'SMS') + (skipped?' — '+skipped+' skipped (no contact number)':'') + '!');
 }
 
 function selectAllOverdue() {
-  D.students.filter(s=>s.status==='Overdue').forEach(s=>_remState.selected.add(s.roll));
+  const overdue=D.students.filter(s=>studentFeeStatus(s)==='Overdue');
+  if(!overdue.length){toast('✅ No overdue student right now');return;}
+  overdue.forEach(s=>_remState.selected.add(s.roll));
   buildReminderTable();
-  toast('✅ Saare overdue students select ho gaye');
+  toast('✅ '+overdue.length+' overdue student'+(overdue.length!==1?'s':'')+' selected');
 }
 
 function printReminderList() {
@@ -7954,7 +8694,7 @@ function printReminderList() {
   if (!selStudents.length) { toast('⚠️ Please select at least one student'); return; }
   const rows = selStudents.map(s => {
     const amt=getStudentDueFee(s);
-    return `<tr><td>${s.name}</td><td>${s.father||''}</td><td>${s.roll}</td><td>${s.cls||''}</td><td>${s.contact||''}</td><td>Rs ${fmt(amt)}</td><td>${s.status}</td></tr>`;
+    return `<tr><td>${htmlEsc(s.name||'')}</td><td>${htmlEsc(s.father||'')}</td><td>${htmlEsc(s.roll)}</td><td>${htmlEsc(s.cls||'')}</td><td>${htmlEsc(s.contact||'—')}</td><td>Rs ${fmt(amt)}</td><td>${studentFeeStatus(s)}</td></tr>`;
   }).join('');
   const h = `<html><head><meta charset="UTF-8"><style>*{box-sizing:border-box;}body{font-family:Arial,sans-serif;padding:22px;}h2{color:#1a6636;font-size:18px;margin-bottom:4px;}.inf{font-size:12px;color:#666;margin-bottom:14px;}table{width:100%;border-collapse:collapse;}th{background:#1a6636;color:#fff;padding:7px 9px;text-align:left;font-size:11px;}td{padding:7px 9px;border-bottom:1px solid #e0e0e0;font-size:12px;}tr:nth-child(even)td{background:#f5faf6;}@media print{button{display:none}}</style></head><body><h2>${D.settings.instName} — Fee Reminder List</h2><div class="inf">Generated: ${new Date().toLocaleString()} | Total: ${selStudents.length} students</div><table><thead><tr><th>Name</th><th>Father</th><th>Roll No</th><th>Program</th><th>Contact</th><th>Amount Due</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table><div style="margin-top:12px"><button onclick="window.print()" style="padding:7px 16px;background:#1a6636;color:#fff;border:none;border-radius:6px;cursor:pointer;">Print</button></div></body></html>`;
   showPrintPreview(h, 'Fee Reminder List');
@@ -8088,9 +8828,21 @@ function renderNotifications(){
   if(!list) return;
   const items=[];
 
-  const overdueStu=D.students.filter(s=>s.status==='Overdue');
+  // Derived from the fee records themselves, not the cached student.status —
+  // that field is only rewritten on fee save, so a part-payment or a fee added
+  // elsewhere used to leave it stale. Transport fee is deliberately excluded
+  // here because it raises its own alerts lower down; counting it in both
+  // places would report the same debt twice.
+  const stuFeeState=s=>{
+    const owing=D.fees.filter(f=>f.roll===s.roll&&feeRemainingAmt(f)>0);
+    if(!owing.length) return '';
+    return owing.some(f=>feeComputeStatus(f).indexOf('Overdue')>=0)?'Overdue':'Pending';
+  };
+  const stuFeeOwed=s=>D.fees.filter(f=>f.roll===s.roll).reduce((a,f)=>a+feeRemainingAmt(f),0);
+
+  const overdueStu=D.students.filter(s=>stuFeeState(s)==='Overdue');
   if(overdueStu.length){
-    const amt=overdueStu.reduce((a,s)=>a+getStudentDueFee(s),0);
+    const amt=overdueStu.reduce((a,s)=>a+stuFeeOwed(s),0);
     items.push({icon:'🚨',bg:'#fff1f1',label:overdueStu.length+' student'+(overdueStu.length!==1?'s':'')+' overdue on fees',sub:'Rs '+fmt(amt)+' due',go:()=>goTo('dashboard',document.querySelector('.ni[onclick*=dashboard]'))});
   }
 
@@ -8100,9 +8852,9 @@ function renderNotifications(){
     items.push({icon:'💰',bg:'#fffbeb',label:pendingSal.length+' pending salary payment'+(pendingSal.length!==1?'s':''),sub:'Rs '+fmt(amt)+' due',go:()=>goTo('salaries',document.querySelector('.ni[onclick*=salaries]'))});
   }
 
-  const pendingStu=D.students.filter(s=>s.status==='Pending');
+  const pendingStu=D.students.filter(s=>stuFeeState(s)==='Pending');
   if(pendingStu.length){
-    items.push({icon:'⏳',bg:'#fffbeb',label:pendingStu.length+' student'+(pendingStu.length!==1?'s':'')+' with pending fees',sub:'Tap to review',go:()=>goTo('students',document.querySelector('.ni[onclick*=students]'))});
+    items.push({icon:'⏳',bg:'#fffbeb',label:pendingStu.length+' student'+(pendingStu.length!==1?'s':'')+' with pending fees',sub:'Rs '+fmt(pendingStu.reduce((a,s)=>a+stuFeeOwed(s),0))+' due',go:()=>goTo('students',document.querySelector('.ni[onclick*=students]'))});
   }
 
   // Transport Fee has its own Pending/Overdue lifecycle, separate from the
@@ -8166,8 +8918,8 @@ function rDash(){
   // f.amt) so a partially-paid instalment contributes its paid portion to
   // "collected" and only its true remaining balance to "pending/overdue" —
   // otherwise partial cash already received would vanish from every total.
-  const pend   = D.fees.filter(f=>f.status==='Pending'||f.status==='Partial');
-  const over   = D.fees.filter(f=>f.status==='Overdue'||f.status==='Partial-Overdue');
+  const pend   = D.fees.filter(f=>{const s=feeComputeStatus(f);return s==='Pending'||s==='Partial';});
+  const over   = D.fees.filter(f=>feeComputeStatus(f).indexOf('Overdue')>=0);
   // Transport Fee is its own module (D.transportFees) but is still real
   // college income, so it must be folded into the dashboard's fee totals
   // (progress bar, this-month collected, pending/overdue, balance summary).
@@ -8202,22 +8954,27 @@ function rDash(){
   // current calendar month — not the all-time total (that's what
   // "Overall Target" / "Total Income" further down are for).
   const now = new Date();
-  // Note: this buckets by each fee record's most-recent-payment date. For a
-  // fee paid across multiple partial payments in different months, the full
-  // cumulative amount is attributed to the latest month (D.feePayments has
-  // the precise per-transaction log if exact month-splitting is ever needed).
-  const paidFeesList = D.fees.filter(f=>feePaidAmt(f)>0);
-  const paidThisMonth = paidFeesList.filter(f=>{
-    const d = txParseDate(f.date);
-    return d && d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth();
+  // Every logged payment is counted in the month it was actually received, so a
+  // fee settled across two months no longer dumps its whole cumulative total
+  // into the later one. Records with no entry in D.feePayments (older data, or
+  // a fine-linked auto-payment) fall back to the record's own date.
+  const inThisMonth = ds => { const d=txParseDate(ds); return !!d && d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth(); };
+  let feeThisMonth=0, feeReceipts=0;
+  D.fees.forEach(f=>{
+    const paid=feePaidAmt(f); if(paid<=0) return;
+    let logged=0;
+    feePaymentsFor(f).forEach(p=>{
+      const amt=Number(p.amount)||0; if(amt<=0) return;
+      logged+=amt;
+      if(inThisMonth(p.date)){ feeThisMonth+=amt; feeReceipts++; }
+    });
+    const rest=paid-logged;
+    if(rest>0 && inThisMonth(f.date)){ feeThisMonth+=rest; feeReceipts++; }
   });
-  const tfPaidThisMonth = tfPaidRecs.filter(t=>{
-    const d = txParseDate(t.date);
-    return d && d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth();
-  });
-  const fPaidThisMonth = paidThisMonth.reduce((a,b)=>a+feePaidAmt(b),0) + tfPaidThisMonth.reduce((a,b)=>a+b.amt,0);
+  const tfPaidThisMonth = tfPaidRecs.filter(t=>inThisMonth(t.date));
+  const fPaidThisMonth = feeThisMonth + tfPaidThisMonth.reduce((a,b)=>a+b.amt,0);
   $('db-f').textContent = 'Rs '+fmt(fPaidThisMonth);
-  if($('db-f-sub')) $('db-f-sub').innerHTML = `<span style="color:var(--g6)">+${paidThisMonth.length+tfPaidThisMonth.length} receipts this month</span>`;
+  if($('db-f-sub')) $('db-f-sub').innerHTML = `<span style="color:var(--g6)">+${feeReceipts+tfPaidThisMonth.length} receipts this month</span>`;
 
   // Pending this week = pending + overdue count (count, not amount)
   const pendingCnt = pend.length + over.length + tfPendRecs.length + tfOverRecs.length;
@@ -8229,7 +8986,9 @@ function rDash(){
   const pbarEl=$('db-fee-pbar'); if(pbarEl){ pbarEl.style.width=pct+'%'; pbarEl.style.background=pct>=75?'linear-gradient(90deg,var(--g6),var(--g4))':pct>=50?'linear-gradient(90deg,var(--yl),#fbbf24)':'linear-gradient(90deg,var(--rd),#f87171)'; }
   const badgeEl=$('db-fee-pct-badge'); if(badgeEl){ badgeEl.textContent=pct+'% Collected'; badgeEl.className='badge '+(pct>=75?'bg-g':pct>=50?'bg-y':'bg-r'); }
   if($('db-fee-prog-lbl')) $('db-fee-prog-lbl').textContent='Rs '+fmt(fPaid)+' / Rs '+fmt(fTotal);
-  if($('db-pc-paid')) $('db-pc-paid').textContent=paidFeesList.length;
+  // These three chips are a partition of D.fees, so "Paid" has to mean fully
+  // paid — counting "any money received" would count every Partial record twice.
+  if($('db-pc-paid')) $('db-pc-paid').textContent=D.fees.filter(f=>feeComputeStatus(f)==='Paid').length;
   if($('db-pc-pend')) $('db-pc-pend').textContent=pend.length;
   if($('db-pc-over')) $('db-pc-over').textContent=over.length;
 
@@ -8277,20 +9036,23 @@ function rDash(){
   // ── Overdue alerts ──
   // A student can be Overdue/Pending purely on Transport Fee even when their
   // tuition (s.status) shows Paid, so derive these lists from the actual fee
-  // + transport-fee records by roll, not just s.status.
+  // + transport-fee records by roll — and from the DERIVED fee status, so a
+  // part-paid-but-overdue instalment still raises the alert.
   const overdueRolls = new Set([
-    ...D.fees.filter(f=>f.status==='Overdue').map(f=>f.roll),
+    ...D.fees.filter(f=>feeRemainingAmt(f)>0&&feeComputeStatus(f).indexOf('Overdue')>=0).map(f=>f.roll),
     ...D.transportFees.filter(t=>t.status==='Overdue').map(t=>t.roll)
   ]);
   const pendingRolls = new Set([
-    ...D.fees.filter(f=>f.status==='Pending').map(f=>f.roll),
+    ...D.fees.filter(f=>feeRemainingAmt(f)>0&&feeComputeStatus(f).indexOf('Overdue')<0).map(f=>f.roll),
     ...D.transportFees.filter(t=>t.status==='Pending').map(t=>t.roll)
   ]);
   const overdueStudents = D.students.filter(s=>overdueRolls.has(s.roll));
   const pendingStudents = D.students.filter(s=>pendingRolls.has(s.roll) && !overdueRolls.has(s.roll));
   if($('db-overdue-cnt')) $('db-overdue-cnt').textContent = overdueStudents.length+' Student'+(overdueStudents.length!==1?'s':'');
   if($('db-reminder-bar')) $('db-reminder-bar').style.display = (overdueStudents.length+pendingStudents.length > 0) ? 'block' : 'none';
-  if($('db-sel-count')) $('db-sel-count').textContent = overdueStudents.length + ' overdue';
+  if($('db-sel-count')) $('db-sel-count').textContent = _remState.selected.size
+    ? _remState.selected.size+' selected'
+    : overdueStudents.length + ' overdue · none selected yet';
   if($('db-overdue-list') && $('db-overdue-empty')){
     if(overdueStudents.length===0){
       $('db-overdue-list').style.display='none'; $('db-overdue-empty').style.display='block';
@@ -8298,14 +9060,13 @@ function rDash(){
       $('db-overdue-empty').style.display='none';
       $('db-overdue-list').style.display='block';
       $('db-overdue-list').innerHTML = overdueStudents.map(s=>{
-        // Only sum fee records that are ACTUALLY overdue for this student —
-        // a student can have multiple fee/instalment rows (some Paid, some
-        // Pending, some Overdue), so grabbing the first match by roll alone
-        // could show a Paid or Pending row's amount instead of the real
-        // overdue amount.
-        const stuOverdueFees=D.fees.filter(f=>f.roll===s.roll && f.status==='Overdue');
+        // Only sum fee records that are ACTUALLY overdue for this student, and
+        // only the part still OWED — a student can have multiple fee/instalment
+        // rows (some Paid, some Pending, some part-paid), so summing f.amt
+        // across them would overstate what is really outstanding.
+        const stuOverdueFees=D.fees.filter(f=>f.roll===s.roll && feeRemainingAmt(f)>0 && feeComputeStatus(f).indexOf('Overdue')>=0);
         const stuOverdueTf=D.transportFees.filter(t=>t.roll===s.roll && t.status==='Overdue');
-        const overdueAmt=(stuOverdueFees.length||stuOverdueTf.length) ? (stuOverdueFees.reduce((a,b)=>a+b.amt,0)+stuOverdueTf.reduce((a,b)=>a+b.amt,0)) : s.fee;
+        const overdueAmt=(stuOverdueFees.length||stuOverdueTf.length) ? (stuOverdueFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+stuOverdueTf.reduce((a,b)=>a+b.amt,0)) : s.fee;
         return `<div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px;background:#fff1f1;border:1px solid #fecaca;margin-bottom:6px">
           <div style="width:32px;height:32px;border-radius:50%;background:var(--rd);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;flex-shrink:0">${s.name[0]}</div>
           <div style="flex:1;min-width:0">
@@ -8339,9 +9100,9 @@ function rDash(){
   // ── Charts ──
   _dbDrawIncomeChart();
   const isInterStuPie=s=>(s.cls||'').startsWith('Inter-');
-  const interBoysIncome = D.fees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&isInterStuPie(s)&&s.gender==='Male'&&f.status==='Paid';}).reduce((a,b)=>a+b.amt,0)
+  const interBoysIncome = D.fees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&isInterStuPie(s)&&s.gender==='Male';}).reduce((a,b)=>a+feePaidAmt(b),0)
     + D.transportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&isInterStuPie(s)&&s.gender==='Male'&&t.status==='Paid';}).reduce((a,b)=>a+b.amt,0);
-  const interGirlsIncome= D.fees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&isInterStuPie(s)&&s.gender==='Female'&&f.status==='Paid';}).reduce((a,b)=>a+b.amt,0)
+  const interGirlsIncome= D.fees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&isInterStuPie(s)&&s.gender==='Female';}).reduce((a,b)=>a+feePaidAmt(b),0)
     + D.transportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&isInterStuPie(s)&&s.gender==='Female'&&t.status==='Paid';}).reduce((a,b)=>a+b.amt,0);
   mkChart('ch-pie','doughnut',{
     labels:['Inter Boys Fee','Inter Girls Fee','Expenses','Salaries'],
@@ -8386,6 +9147,91 @@ function feeComputeStatus(f){
 function feeStatusLabel(status){
   return {Paid:'PAID',Partial:'PARTIALLY PAID','Partial-Overdue':'PARTIALLY PAID (OVERDUE)',Overdue:'OVERDUE',Pending:'UNPAID'}[status]||status.toUpperCase();
 }
+
+/* ══════════════════════════════════════════════════
+   DISCOUNT / SCHOLARSHIP / CONCESSION
+   A fee record's `amt` is ALWAYS the NET payable figure. Every existing
+   consumer — feeRemainingAmt, feeComputeStatus, buildTx, rDash, the reports,
+   receipts, vouchers — already treats `amt` as "what this student owes", so
+   relief is applied BEFORE `amt` is written rather than subtracted afterwards.
+   Nothing downstream needs to know discounts exist.
+
+   The gross figure and the two relief components are stored alongside it for
+   display, receipts and reporting only:
+     grossAmt         full fee before any relief
+     scholarshipAmt   relief from the student's standing scholarship
+     concessionAmt    one-off relief granted by the clerk on THIS record
+     discountReason   why the one-off concession was given
+     scholarshipLabel e.g. 'Merit (50%)', captured at billing time so that
+                      later editing a student's scholarship never silently
+                      rewrites the history of already-issued fees.
+══════════════════════════════════════════════════ */
+// Assigns the permanent feeId on demand, for records created mid-save that
+// need one BEFORE the next buildTx() backfill (e.g. a payment logged against a
+// brand-new fee). D.seq.fid is already seeded past every existing id by
+// ensureTxSeq(), which runs at startup.
+function ensureFeeId(f){
+  if(!f) return '';
+  if(!f.feeId){
+    if(!D.seq||typeof D.seq!=='object') D.seq={};
+    if(typeof D.seq.fid!=='number'||isNaN(D.seq.fid)) D.seq.fid=0;
+    f.feeId='F'+(++D.seq.fid);
+  }
+  return f.feeId;
+}
+function feeScholarshipAmt(f){ return Math.max(0,Number(f&&f.scholarshipAmt)||0); }function feeConcessionAmt(f){ return Math.max(0,Number(f&&f.concessionAmt)||0); }
+function feeDiscountAmt(f){ return feeScholarshipAmt(f)+feeConcessionAmt(f); }
+// Gross falls back to net+relief so records created before discounts existed
+// (grossAmt undefined) still report a sane gross figure.
+function feeGrossAmt(f){
+  const g=Number(f&&f.grossAmt);
+  return isFinite(g)&&g>0?g:(Number(f&&f.amt)||0)+feeDiscountAmt(f);
+}
+// The student's standing scholarship, normalised, or null if they have none.
+function studentScholarship(stu){
+  if(!stu) return null;
+  const type=stu.schType||'None';
+  const val=Number(stu.schVal)||0;
+  if(type==='None'||val<=0) return null;
+  return {type,mode:(stu.schMode==='fixed'?'fixed':'percent'),val,note:stu.schNote||''};
+}
+function scholarshipLabel(sch){
+  if(!sch) return '';
+  return sch.type+' ('+(sch.mode==='percent'?sch.val+'%':'Rs '+sch.val.toLocaleString())+')';
+}
+function studentScholarshipLabel(stu){ return scholarshipLabel(studentScholarship(stu)); }
+// Relief this scholarship grants against `gross` — never more than `gross`.
+function scholarshipReliefOn(sch,gross){
+  gross=Math.max(0,Number(gross)||0);
+  if(!sch||!gross) return 0;
+  const raw=sch.mode==='percent'?gross*sch.val/100:sch.val;
+  return Math.max(0,Math.min(gross,Math.round(raw)));
+}
+// THE single entry point for every fee-creation path. Give it the student and
+// the gross fee (plus any one-off concession) and it returns exactly the fields
+// to stamp on the record, including the net `amt`. Relief can never exceed the
+// gross, so a fee can never go negative.
+function buildFeeDiscount(stu,gross,concessionAmt,discountReason){
+  gross=Math.max(0,Number(gross)||0);
+  const sch=studentScholarship(stu);
+  const schAmt=scholarshipReliefOn(sch,gross);
+  const conc=Math.max(0,Math.min(gross-schAmt,Math.round(Number(concessionAmt)||0)));
+  return {
+    grossAmt:gross,
+    scholarshipAmt:schAmt,
+    scholarshipLabel:schAmt>0?scholarshipLabel(sch):'',
+    concessionAmt:conc,
+    discountReason:conc>0?String(discountReason||'').trim():'',
+    amt:Math.max(0,gross-schAmt-conc)
+  };
+}
+// Short human-readable summary of the relief on a record, for tables/receipts.
+function feeDiscountSummary(f){
+  const parts=[];
+  if(feeScholarshipAmt(f)>0) parts.push((f.scholarshipLabel||'Scholarship')+' −Rs '+fmt(feeScholarshipAmt(f)));
+  if(feeConcessionAmt(f)>0) parts.push((f.discountReason||'Concession')+' −Rs '+fmt(feeConcessionAmt(f)));
+  return parts.join(' · ');
+}
 // Groups a plan's records by planId. Falls back to roll+instTotal ONLY for
 // legacy records saved before planId existed — never use roll+instTotal for
 // new plans, since two plans for the same student can share the same total
@@ -8403,7 +9249,11 @@ function instPlanRows(f){
 }
 function instPlanSummary(f){
   const rows=instPlanRows(f);
-  const totalFee=f.instTotal;
+  // The plan total is whatever its parts actually add up to. `instTotal` is only
+  // a snapshot taken when the plan was created, so it goes stale the moment one
+  // instalment is edited or carries a late fee — Σ amt can never disagree with
+  // the rows the user is looking at.
+  const totalFee=rows.length?rows.reduce((s,r)=>s+(Number(r.amt)||0),0):(Number(f.instTotal)||0);
   const totalPaid=rows.reduce((s,r)=>s+feePaidAmt(r),0);
   const paidCount=rows.filter(r=>feeComputeStatus(r)==='Paid').length;
   return {
@@ -8439,30 +9289,80 @@ function onStuFeeTypeChange(val){
   stuFeePreview();
 }
 
+/* ══════════════════════════════════════════════════
+   ADD STUDENT — Scholarship fields
+══════════════════════════════════════════════════ */
+// The scholarship exactly as currently entered in the Add/Edit Student form,
+// shaped like a student record so studentScholarship()/buildFeeDiscount() can
+// consume it unchanged — one source of truth for both preview and save.
+function stuFormScholarship(){
+  return {
+    schType:($('s-schtype')||{}).value||'None',
+    schMode:($('s-schmode')||{}).value||'percent',
+    schVal:parseInt(($('s-schval')||{}).value)||0,
+    schNote:(($('s-schnote')||{}).value||'').trim()
+  };
+}
+function onStuScholarshipChange(){
+  const on=(($('s-schtype')||{}).value||'None')!=='None';
+  ['s-schmode-wrap','s-schval-wrap','s-schnote-wrap'].forEach(id=>{const el=$(id); if(el) el.style.display=on?'':'none';});
+  const line=$('s-sch-note-line'); if(line) line.style.display=on?'block':'none';
+  const lbl=$('s-schval-lbl');
+  if(lbl) lbl.textContent=(($('s-schmode')||{}).value||'percent')==='percent'?'Relief (%)':'Relief (Rs)';
+  if(!on&&$('s-schval')) $('s-schval').value='0';
+  stuFeePreview();
+}
+// Puts the scholarship controls back to a known state (Add) or fills them from
+// an existing student (Edit).
+function setStuScholarshipFields(stu){
+  if($('s-schtype'))  $('s-schtype').value=(stu&&stu.schType)||'None';
+  if($('s-schmode'))  $('s-schmode').value=(stu&&stu.schMode)||'percent';
+  if($('s-schval'))   $('s-schval').value=(stu&&Number(stu.schVal))||0;
+  if($('s-schnote'))  $('s-schnote').value=(stu&&stu.schNote)||'';
+  onStuScholarshipChange();
+}
+
 function stuFeePreview(){
   const prev=$('s-fee-preview');
   if(!prev) return;
-  const feeAmt=parseInt(($('sfa')||{}).value)||0;
+  const grossAmt=parseInt(($('sfa')||{}).value)||0;
   const feeType=($('s-ftype')||{}).value||'full';
   const instCount=parseInt(($('s-finst-count')||{}).value)||2;
   const dueDate=($('s-fdue')||{}).value||'';
-  if(!feeAmt||!dueDate){prev.style.display='none';return;}
+  if(!grossAmt||!dueDate){prev.style.display='none';return;}
+  // The scholarship comes off the top: instalments split the NET payable, and
+  // every figure previewed below is what the student will actually be billed.
+  const disc=buildFeeDiscount(stuFormScholarship(),grossAmt,0,'');
+  const feeAmt=disc.amt;
   const today=new Date(); today.setHours(0,0,0,0);
   const dueDt=parseDate(dueDate); dueDt.setHours(0,0,0,0);
   const isOverdue=dueDt<today;
   const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
   let html='<div style="font-size:11px;font-weight:700;color:var(--s5);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">📋 Fee Plan Preview</div>';
+  if(disc.scholarshipAmt>0){
+    html+=`<div style="display:flex;justify-content:space-between;background:#eef7f1;border:1px solid var(--g1);border-radius:7px;padding:7px 11px;margin-bottom:8px;font-size:12px">
+      <span>🎓 ${disc.scholarshipLabel}</span>
+      <span>Rs ${grossAmt.toLocaleString()} − Rs ${disc.scholarshipAmt.toLocaleString()} = <strong>Rs ${feeAmt.toLocaleString()}</strong> payable</span>
+    </div>`;
+  }
   if(feeType==='instalment'){
-    const perAmt=Math.floor(feeAmt/instCount);
-    const remainder=feeAmt-(perAmt*instCount);
+    // Mirrors saveStu() exactly: the GROSS fee is split first and the
+    // scholarship is applied to each part, so the preview shows the same
+    // rupee figures that will be saved (splitting the net instead can differ
+    // by a rupee or two per part after rounding).
+    const perGross=Math.floor(grossAmt/instCount);
+    const grossRem=grossAmt-(perGross*instCount);
+    const sch=stuFormScholarship();
+    const parts=[];
+    for(let i=0;i<instCount;i++) parts.push(buildFeeDiscount(sch,i===instCount-1?perGross+grossRem:perGross,0,''));
     // Detect level from current student form
     const clsVal=($('scls')||{}).value||'';
     const interval=getInstInterval(clsVal,instCount);
     html+=`<div style="font-size:11px;color:var(--s5);margin-bottom:6px">📐 Intermediate (12-month year) · Every <strong>${interval} month(s)</strong> apart</div>`;
     html+='<div style="display:flex;flex-wrap:wrap;gap:6px">';
     for(let i=0;i<instCount;i++){
-      const amt=i===instCount-1?perAmt+remainder:perAmt;
+      const amt=parts[i].amt;
       const instDue=addMonths(dueDt, i*interval);
       const instOverdue=instDue<today;
       html+=`<div style="background:${instOverdue?'#fee2e2':'#fff'};border:1px solid ${instOverdue?'#fca5a5':'var(--g1)'};border-radius:7px;padding:7px 10px;flex:1;min-width:90px;text-align:center">
@@ -8508,7 +9408,7 @@ function feeRollLookup(val){
   }
 
   const today=new Date(); today.setHours(0,0,0,0);
-  const stuFees=D.fees.filter(f=>f.roll===stu.roll&&f.status!=='Paid');
+  const stuFees=D.fees.filter(f=>f.roll===stu.roll&&feeRemainingAmt(f)>0);
 
   let html=`<div style="background:#fff;border:1px solid var(--g1);border-radius:8px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
     <div style="width:34px;height:34px;border-radius:50%;background:var(--g5);color:#fff;font-weight:800;font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${stu.name[0]}</div>
@@ -8527,10 +9427,12 @@ function feeRollLookup(val){
       if(dueDt) dueDt.setHours(0,0,0,0);
       const isOvr=dueDt&&dueDt<today;
       const diffDays=dueDt?Math.ceil((dueDt-today)/(1000*60*60*24)):null;
+      const rowPaid=feePaidAmt(f), rowRem=feeRemainingAmt(f);
+      const rowLbl=rowPaid>0?(isOvr?'⚠️ PART PAID · OVERDUE':'🟡 PART PAID'):(isOvr?'⚠️ OVERDUE':'⏳ PENDING');
       html+=`<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:${isOvr?'#fff1f1':'var(--s0)'};border:1px solid ${isOvr?'#fca5a5':'var(--s2)'};margin-bottom:5px">
         <div style="flex:1;min-width:0">
-          <div style="font-size:12px;font-weight:700;color:${isOvr?'var(--rd)':'var(--s6)'}">${isOvr?'⚠️ OVERDUE':'⏳ PENDING'} ${f.isInstalment?'· Inst '+f.instPart:''}</div>
-          <div style="font-size:11px;color:var(--s4)">Rs ${f.amt.toLocaleString()} ${f.dueDate?'· Due: '+f.dueDate:''} ${isOvr&&diffDays!==null?'('+Math.abs(diffDays)+' days overdue)':(!isOvr&&diffDays!==null?'('+diffDays+' days left)':'')}</div>
+          <div style="font-size:12px;font-weight:700;color:${isOvr?'var(--rd)':'var(--s6)'}">${rowLbl} ${f.isInstalment?'· Inst '+f.instPart:''}</div>
+          <div style="font-size:11px;color:var(--s4)">Rs ${rowRem.toLocaleString()}${rowPaid>0?' balance (Rs '+rowPaid.toLocaleString()+' of Rs '+(f.amt||0).toLocaleString()+' received)':''} ${f.dueDate?'· Due: '+f.dueDate:''} ${isOvr&&diffDays!==null?'('+Math.abs(diffDays)+' days overdue)':(!isOvr&&diffDays!==null?'('+diffDays+' days left)':'')}</div>
         </div>
         <button onclick="feeRollCollect(${idx},'${stu.roll}')" style="background:var(--g6);color:#fff;border:none;border-radius:7px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0">Collect 💳</button>
       </div>`;
@@ -8569,7 +9471,13 @@ function feeRollCollect(feeIdx, roll){
   $('fn').value = stu.name;
   $('fr').value = stu.roll;
   $('feeEditIdx').value = feeIdx;
-  $('fa').value = fee.amt;
+  // #fa is the GROSS fee — same contract as quickCollect(). Writing fee.amt
+  // (the already-discounted net) here would deduct the student's scholarship a
+  // second time on save, and it would drop any concession on the record because
+  // openAddFee() has just cleared #fConc / #fConcReason.
+  const rcFineTop = applyPendingFinesToFeeModal(stu.roll, 0);
+  feeModalLoadDiscount(fee, rcFineTop);
+  const rcCollected = feeModalNetAmt();
   const semEl=$('fsm');
   if(semEl){for(let i=0;i<semEl.options.length;i++){if(semEl.options[i].value===fee.sem||semEl.options[i].text===fee.sem){semEl.selectedIndex=i;break;}}}
   $('fdd').value = fee.dueDate||'';
@@ -8584,14 +9492,14 @@ function feeRollCollect(feeIdx, roll){
 
   if($('fsum-name')) $('fsum-name').textContent = stu.name;
   if($('fsum-roll')) $('fsum-roll').textContent = stu.roll;
-  if($('fsum-amt'))  $('fsum-amt').textContent  = 'Rs '+fmt(fee.amt);
+  if($('fsum-amt'))  $('fsum-amt').textContent  = 'Rs '+fmt(rcCollected);
   if($('fsum-st'))   $('fsum-st').innerHTML     = bdg('Paid');
   if($('fsum-mt'))   $('fsum-mt').textContent   = 'Cash';
 
   if($('f-roll-lookup')) $('f-roll-lookup').value='';
   if($('f-roll-fees'))   $('f-roll-fees').style.display='none';
 
-  feeShowInstPlan(roll, fee.instTotal||null);
+  feeShowInstPlan(roll, fee.instTotal||null, fee);
   feeStep(3);
 }
 fillDeptDropdowns();

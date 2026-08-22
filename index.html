@@ -500,16 +500,17 @@
             <button class="btn btn-green" onclick="openAddFee()">+ Record Payment</button>
           </div>
         </div>
-        <div class="cards c4">
+        <div class="cards c5">
           <div class="sc"><div class="sc-ico ig">✅</div><div class="sc-val" id="f-c">—</div><div class="sc-lbl">Collected (Rs)</div></div>
           <div class="sc"><div class="sc-ico io">⏳</div><div class="sc-val" id="f-p">—</div><div class="sc-lbl">Pending (Rs)</div></div>
           <div class="sc"><div class="sc-ico ir">❌</div><div class="sc-val" id="f-o">—</div><div class="sc-lbl">Overdue (Rs)</div></div>
+          <div class="sc" onclick="fFStPartial()" style="cursor:pointer" title="Show only the partially paid fees"><div class="sc-ico io">🟡</div><div class="sc-val" id="f-pp">—</div><div class="sc-lbl">Part-Paid Balance (Rs)</div></div>
           <div class="sc"><div class="sc-ico ib">📊</div><div class="sc-val" id="f-r">—</div><div class="sc-lbl">Collection Rate</div></div>
         </div>
         <div class="card">
           <div class="frow">
             <input class="fi" placeholder="🔍  Search student or receipt…" oninput="fF(this.value)">
-            <select class="fs" onchange="fFSt(this.value)"><option value="">All Status</option><option>Paid</option><option>Pending</option><option>Overdue</option></select>
+            <select class="fs" id="fee-filter-status" onchange="fFSt(this.value)"><option value="">All Status</option><option>Paid</option><option value="Partial">🟡 Partial</option><option value="Partial-Overdue">🟠 Partial — Overdue</option><option value="_unpaid">Any Unpaid Balance</option><option>Pending</option><option>Overdue</option></select>
             <select class="fs" onchange="fFMt(this.value)"><option value="">All Methods</option><option>Cash</option><option>Bank Transfer</option><option>Online</option><option>Cheque</option></select>
             <select class="fs" onchange="fFGn(this.value)"><option value="">All Campus</option><option value="Male">👦 Boys Campus</option><option value="Female">👧 Girls Campus</option></select>
             <select class="fs" id="fee-filter-cls" onchange="fFCls(this.value)"><option value="">All Classes</option></select>
@@ -517,7 +518,7 @@
           </div>
           <div class="tsw">
             <table class="dt">
-              <thead><tr><th>Receipt</th><th>Student</th><th>Roll No</th><th>Gender</th><th>Semester</th><th>Amount (Rs)</th><th>Due Date</th><th>Paid Date</th><th>Method</th><th>Status</th><th>Actions</th></tr></thead>
+              <thead><tr><th>Receipt</th><th>Student</th><th>Roll No</th><th>Gender</th><th>Semester</th><th>Amount (Rs)</th><th>Paid (Rs)</th><th>Balance (Rs)</th><th>Due Date</th><th>Paid Date</th><th>Method</th><th>Status</th><th>Actions</th></tr></thead>
               <tbody id="feeTB"></tbody>
             </table>
           </div>
@@ -1099,6 +1100,36 @@
         <div style="font-size:11px;color:var(--s4);margin-top:4px">⚠️ If the due date has already passed, the fee will be marked Overdue automatically</div>
       </div>
     </div>
+    <div class="form-sec">Scholarship / Concession</div>
+    <div class="mg">
+      <div class="mf"><label>Scholarship Type</label>
+        <select id="s-schtype" onchange="onStuScholarshipChange()">
+          <option value="None">None</option>
+          <option value="Merit">🏅 Merit</option>
+          <option value="Sports">🏆 Sports</option>
+          <option value="Need-based">🤝 Need-based</option>
+          <option value="Staff Ward">👨‍🏫 Staff Ward</option>
+          <option value="Sibling">👨‍👩‍👦 Sibling</option>
+          <option value="Hifz-e-Quran">📖 Hifz-e-Quran</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+      <div class="mf" id="s-schmode-wrap" style="display:none"><label>Relief Type</label>
+        <select id="s-schmode" onchange="onStuScholarshipChange()">
+          <option value="percent">Percentage of fee (%)</option>
+          <option value="fixed">Fixed amount (Rs)</option>
+        </select>
+      </div>
+      <div class="mf" id="s-schval-wrap" style="display:none"><label id="s-schval-lbl">Relief Value</label>
+        <input id="s-schval" type="number" min="0" value="0" oninput="stuFeePreview()">
+      </div>
+      <div class="mf" id="s-schnote-wrap" style="display:none"><label>Note / Reference</label>
+        <input id="s-schnote" placeholder="e.g. Board position 3rd, approved by Principal">
+      </div>
+    </div>
+    <div id="s-sch-note-line" style="display:none;font-size:11.5px;color:var(--s4);margin:-4px 0 12px">
+      ℹ️ This scholarship is applied automatically to every new fee raised for this student. It never changes fees that were already issued.
+    </div>
     <!-- Fee Plan Preview -->
     <div id="s-fee-preview" style="display:none;background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:12px 14px;margin-bottom:12px;font-size:12.5px;color:var(--g8)"></div>
     <div class="mo-acts">
@@ -1295,6 +1326,18 @@
   </div>
 </div>
 
+<!-- STUDENT FEE LEDGER (every payment ever received) -->
+<div class="mo" id="mo-feeLedger">
+  <div class="mo-box" style="max-width:720px">
+    <h3>📜 Fee Ledger — <span id="vLedgerName"></span></h3>
+    <div id="vLedgerBody"></div>
+    <div class="mo-acts">
+      <button class="mo-cancel" onclick="closeMo('feeLedger')">Close</button>
+      <button class="mo-save" id="vLedgerPrint">🖨️ Print Ledger</button>
+    </div>
+  </div>
+</div>
+
 <!-- EXPORT EMPLOYEE -->
 <div class="mo" id="mo-exportEmp">
   <div class="mo-box" style="max-width:400px">
@@ -1374,9 +1417,19 @@
           <div style="font-size:11px;color:var(--s4);margin-top:4px">⚠️ Fee will be automatically marked Overdue after the due date passes</div>
         </div>
         <div class="mf">
-          <label>Total Fee Amount (Rs) *</label>
+          <label>Total Fee — Before Discount (Rs) *</label>
           <input id="fa" type="number" value="25000" style="width:100%;padding:10px 13px;border:1.5px solid var(--s2);border-radius:var(--rads);font-size:14px;outline:none;font-family:inherit" oninput="feeUpdateInstalment()">
         </div>
+        <div class="mf">
+          <label>Extra Concession (Rs)</label>
+          <input id="fConc" type="number" min="0" value="0" oninput="feeDiscountChange()" style="width:100%;padding:10px 13px;border:1.5px solid var(--s2);border-radius:var(--rads);font-size:14px;outline:none;font-family:inherit">
+          <div style="font-size:11px;color:var(--s4);margin-top:4px">One-off relief on this fee only. Any standing scholarship is applied automatically.</div>
+        </div>
+        <div class="mf" id="fConcReasonWrap" style="display:none;grid-column:1/-1">
+          <label>Concession Reason *</label>
+          <input id="fConcReason" placeholder="e.g. Hardship case — approved by the Principal" oninput="feeDiscountChange()" style="width:100%;padding:10px 13px;border:1.5px solid var(--s2);border-radius:var(--rads);font-size:14px;outline:none;font-family:inherit">
+        </div>
+        <div id="fDiscBox" style="display:none;grid-column:1/-1;background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:10px 13px;font-size:12.5px;margin-bottom:13px"></div>
         <div class="mf">
           <label>Semester / Year</label>
           <select id="fsm" style="width:100%;padding:10px 13px;border:1.5px solid var(--s2);border-radius:var(--rads);font-size:14px;outline:none;font-family:inherit;background:#fff">
@@ -1386,7 +1439,8 @@
         <div class="mf" id="fStatusWrap">
           <label>Payment Status</label>
           <select id="fst" style="width:100%;padding:10px 13px;border:1.5px solid var(--s2);border-radius:var(--rads);font-size:14px;outline:none;font-family:inherit;background:#fff" onchange="feeStatusChange(this.value)">
-            <option value="Paid">✅ Paid</option>
+            <option value="Paid">✅ Paid in Full</option>
+            <option value="Partial">🟡 Partial Payment</option>
             <option value="Pending">⏳ Pending</option>
             <option value="Overdue">❌ Overdue</option>
           </select>
@@ -1580,6 +1634,13 @@
       <input type="checkbox" id="bf-separate" style="margin-top:3px;width:16px;height:16px;flex:none">
       <label for="bf-separate" style="font-weight:normal;font-size:12.5px;line-height:1.5;cursor:pointer">
         Show as <strong>separate voucher</strong> <span style="color:var(--s4)">(off = merge into student's pending fee)</span>
+      </label>
+    </div>
+
+    <div class="mf" style="margin-top:4px;display:flex;align-items:flex-start;gap:8px;background:var(--g0);border:1px solid var(--g1);border-radius:var(--rads);padding:10px 14px">
+      <input type="checkbox" id="bf-sch" style="margin-top:3px;width:16px;height:16px;flex:none">
+      <label for="bf-sch" style="font-weight:normal;font-size:12.5px;line-height:1.5;cursor:pointer">
+        Apply each student's <strong>standing scholarship</strong> to this fee <span style="color:var(--s4)">(off = full amount charged — scholarships normally apply to tuition only)</span>
       </label>
     </div>
 

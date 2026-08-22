@@ -171,11 +171,14 @@ button,input,select,textarea{font-family:inherit;}
 /* ═══ STAT CARDS — Fully unified across all modules ═══ */
 .cards{display:grid;gap:14px;margin-bottom:20px;}
 .c4{grid-template-columns:repeat(4,1fr);}
+.c5{grid-template-columns:repeat(5,1fr);}
 .c3{grid-template-columns:repeat(3,1fr);}
 .c2{grid-template-columns:repeat(2,1fr);}
+@media(max-width:1400px){.c5{grid-template-columns:repeat(3,1fr);}}
 @media(max-width:1080px){.c4{grid-template-columns:repeat(2,1fr);}}
-@media(max-width:600px){.c3,.c4{grid-template-columns:repeat(2,1fr);}}
-@media(max-width:380px){.c3,.c4,.c2{grid-template-columns:1fr;}}
+@media(max-width:1080px){.c5{grid-template-columns:repeat(2,1fr);}}
+@media(max-width:600px){.c3,.c4,.c5{grid-template-columns:repeat(2,1fr);}}
+@media(max-width:380px){.c3,.c4,.c5,.c2{grid-template-columns:1fr;}}
 
 /* THE UNIFIED STAT CARD */
 .sc{
