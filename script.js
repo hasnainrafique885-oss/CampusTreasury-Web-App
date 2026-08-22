@@ -199,7 +199,25 @@ const fmt = v => Number(v).toLocaleString('en-PK');
 // in the Expense ledger). Excess deduction beyond gross is simply capped at gross.
 const netPay = s => Math.max(0, (Number(s.basic)||0) + (Number(s.allow)||0) - (Number(s.deduct)||0));
 const todayStr = () => new Date().toLocaleDateString('en-PK',{day:'numeric',month:'short',year:'numeric'});
-const isoDate = () => new Date().toISOString().slice(0,10);
+/* ── Calendar-date helpers ────────────────────────────────────────────────
+   NEVER use toISOString() for a calendar date. new Date(y,m,d) is LOCAL
+   midnight, which in Asia/Karachi (UTC+5) is 19:00 UTC of the PREVIOUS day,
+   so toISOString().slice(0,10) returned the day before the intended date —
+   enter 2026-09-01 as the first due date and instalment 1 was saved as
+   2026-08-31. ymd() formats from the local parts instead.
+   addMonths() also clamps the day, because new Date(y, m+n, d) silently
+   overflows month-end: 31 Jan + 1 month used to give 3 March. */
+const ymd = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+function addMonths(date, months){
+  const y=date.getFullYear(), m=date.getMonth(), day=date.getDate();
+  const lastDayOfTarget=new Date(y, m+months+1, 0).getDate(); // day 0 = last day of the previous month
+  return new Date(y, m+months, Math.min(day, lastDayOfTarget));
+}
+const isoDate = () => ymd(new Date());
+// `new Date('2026-09-01')` is parsed as UTC midnight, which lands on the
+// PREVIOUS local day in any timezone west of UTC. Parse date-only strings as
+// LOCAL midnight so due-date comparisons and printed dates never shift.
+const parseDate = s => new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(s)) ? String(s)+'T00:00:00' : s);
 const avC = i => ['av0','av1','av2','av3'][i%4];
 const bdgCls = {Paid:'badge bg-g',Pending:'badge bg-y',Overdue:'badge bg-r',Active:'badge bg-g',Approved:'badge bg-g',Income:'badge bg-g',Expense:'badge bg-r','On Leave':'badge bg-y',Inactive:'badge bg-r',Partial:'badge bg-y','Partial-Overdue':'badge bg-r'};
 const bdg = s => `<span class="${bdgCls[s]||'badge bg-y'}">${s==='Partial'?'PARTIALLY PAID':s==='Partial-Overdue'?'PARTIAL (OVERDUE)':s}</span>`;
@@ -225,15 +243,57 @@ function ensureTxSeq(){
   // Assigns a permanent sequence number to any record that doesn't have one yet.
   // Once assigned, a record's txSeq (and therefore its transaction ID) never
   // changes or gets reassigned to a different record, even after deletes.
-  D.fees.forEach(f=>{if(f.txSeq==null)f.txSeq=++D.seq.fee;});
-  D.salaries.forEach(s=>{if(s.txSeq==null)s.txSeq=++D.seq.sal;});
-  D.expenses.forEach(e=>{if(e.txSeq==null)e.txSeq=++D.seq.exp;});
-  D.transportFees.forEach(t=>{if(t.txSeq==null)t.txSeq=++D.seq.tftx;});
+  // The counters are first pulled up past the highest txSeq already in the data,
+  // so restoring a backup saved before D.seq existed cannot hand out duplicate
+  // transaction IDs.
+  const bump=(key,list)=>{
+    if(!D.seq||typeof D.seq!=='object') D.seq={};
+    if(typeof D.seq[key]!=='number'||isNaN(D.seq[key])) D.seq[key]=0;
+    (list||[]).forEach(r=>{ if(!r)return; const n=Number(r.txSeq); if(isFinite(n)&&n>D.seq[key]) D.seq[key]=n; });
+  };
+  bump('fee',D.fees); bump('sal',D.salaries); bump('exp',D.expenses); bump('tftx',D.transportFees);
+  D.fees.forEach(f=>{if(!isFinite(Number(f.txSeq)))f.txSeq=++D.seq.fee;});
+  D.salaries.forEach(s=>{if(!isFinite(Number(s.txSeq)))s.txSeq=++D.seq.sal;});
+  D.expenses.forEach(e=>{if(!isFinite(Number(e.txSeq)))e.txSeq=++D.seq.exp;});
+  D.transportFees.forEach(t=>{if(!isFinite(Number(t.txSeq)))t.txSeq=++D.seq.tftx;});
 }
 function buildTx() {
   ensureTxSeq();
   D.tx=[];
-  D.fees.forEach((f,idx)=>{if(f.status==='Paid')D.tx.push({id:'TXN-'+String(f.txSeq).padStart(3,'0'),desc:'Fee - '+f.student,type:'Income',amt:f.amt,date:f.date,cat:'Fees',srcType:'fee',srcIdx:idx});});
+  // ── Fee income ───────────────────────────────────────────────────────────
+  // Built from money actually RECEIVED (feePaidAmt), not from status==='Paid'.
+  // Before this, a Rs 10,000 partial payment against a Rs 25,000 instalment
+  // produced NO ledger entry while rDash() still counted the cash, so the Fees
+  // page, the Dashboard and the Transactions page disagreed and nothing
+  // reconciled. Individual instalment payments now come from the D.feePayments
+  // log (one ledger line per payment, with that payment's own date), each log
+  // entry is consumed at most once, and whatever is left over — ordinary full
+  // payments never write to feePayments — is emitted as a single line. So the
+  // fee income total is always exactly Σ feePaidAmt, i.e. the dashboard figure.
+  const usedPayments=new Set();
+  D.fees.forEach((f,idx)=>{
+    const paid=feePaidAmt(f);
+    if(paid<=0) return;
+    const seq='TXN-'+String(f.txSeq).padStart(3,'0');
+    const label='Fee - '+f.student+(f.isInstalment&&f.instPart?' (Inst '+f.instPart+')':'');
+    let logged=0, n=0;
+    (D.feePayments||[]).forEach((p,pi)=>{
+      if(!p||usedPayments.has(pi)||p.roll!==f.roll) return;
+      // Match the payment to this exact instalment row. planId is the reliable
+      // key; if EITHER side has one they must agree, so a payment logged for a
+      // new plan can never be attributed to a legacy plan that happens to share
+      // the same roll + instPart + instTotal.
+      if((p.planId||f.planId)&&p.planId!==f.planId) return;
+      if(f.isInstalment){ if(p.instPart!==f.instPart||p.instTotal!==f.instTotal) return; }
+      else if(p.instPart) return;
+      const amt=Number(p.amount)||0;
+      if(amt<=0||logged+amt>paid) return; // never log more than was received
+      usedPayments.add(pi); logged+=amt; n++;
+      D.tx.push({id:seq+'-'+n,desc:label,type:'Income',amt:amt,date:p.date||f.date,cat:'Fees',srcType:'fee',srcIdx:idx,payId:p.paymentId});
+    });
+    const rest=paid-logged;
+    if(rest>0) D.tx.push({id:n?seq+'-'+(n+1):seq,desc:label,type:'Income',amt:rest,date:f.date,cat:'Fees',srcType:'fee',srcIdx:idx});
+  });
   // Transport Fee is real college income too — include Paid transport fee
   // records in the Transactions ledger, same as regular tuition fee.
   D.transportFees.forEach((t,idx)=>{if(t.status==='Paid')D.tx.push({id:'TFTXN-'+String(t.txSeq).padStart(3,'0'),desc:'Transport Fee - '+t.student,type:'Income',amt:t.amt,date:t.date,cat:'Transport',srcType:'transportFee',srcIdx:idx});});
@@ -257,7 +317,7 @@ function autoCheckOverdue() {
     if (f.status !== 'Pending') return;
     if (!f.dueDate) return;
 
-    const due = new Date(f.dueDate);
+    const due = parseDate(f.dueDate);
     due.setHours(0,0,0,0);
 
     if (due < today) {
@@ -272,7 +332,7 @@ function autoCheckOverdue() {
   let tfChanged = 0;
   D.transportFees.forEach(t => {
     if (t.status !== 'Pending' || !t.dueDate) return;
-    const due = new Date(t.dueDate); due.setHours(0,0,0,0);
+    const due = parseDate(t.dueDate); due.setHours(0,0,0,0);
     if (due < today) { t.status = 'Overdue'; tfChanged++; }
   });
 
@@ -409,6 +469,12 @@ function saveData(){
 }
 
 loadPersistedData();
+// The ledger is DERIVED data, but saveData() serialises the whole of D, so a
+// stale D.tx comes back with the restored state. Rebuild it from the freshly
+// loaded records — otherwise the buildTx() call above (which ran against the
+// defaults) is thrown away and the app shows whatever ledger was persisted by
+// an older version of this file.
+try{ buildTx(); }catch(e){ console.warn('Ledger rebuild after load failed:',e); }
 try{ window.addEventListener('beforeunload', saveData); }catch(e){}
 
 // Build the login screen's role cards from ROLES so a new role added there
@@ -883,7 +949,7 @@ function rAuditLog() {
 function renderAuditList() {
   const q    = _auditFilter.q.toLowerCase();
   const type = _auditFilter.type;
-  const fromD = _auditFilter.from ? new Date(_auditFilter.from) : null;
+  const fromD = _auditFilter.from ? parseDate(_auditFilter.from) : null;
   // "To" date should include the whole day, not just midnight, so an entry
   // logged at 4pm on the selected end date isn't excluded.
   const toD = _auditFilter.to ? new Date(_auditFilter.to + 'T23:59:59.999') : null;
@@ -1892,10 +1958,13 @@ function openAddStu(){
   // Default due date driven by Settings → Fee Configuration → Fee Due Day
   // (falls back to the 25th if not configured)
   const dueDay=(D.settings&&D.settings.feeDueDay)||25;
-  const now=new Date();
-  let d=new Date(now.getFullYear(),now.getMonth(),dueDay);
-  if(d<now) d=new Date(now.getFullYear(),now.getMonth()+1,dueDay);
-  if($('s-fdue')) $('s-fdue').value=d.toISOString().slice(0,10);
+  const now=new Date(); now.setHours(0,0,0,0);
+  // Clamp to month-end (a feeDueDay of 31 must not roll into the next month)
+  // and compare date-only, so on the due day itself the default stays today.
+  const clampDay=(y,m)=>Math.min(dueDay,new Date(y,m+1,0).getDate());
+  let d=new Date(now.getFullYear(),now.getMonth(),clampDay(now.getFullYear(),now.getMonth()));
+  if(d<now){ const nx=addMonths(new Date(now.getFullYear(),now.getMonth(),1),1); d=new Date(nx.getFullYear(),nx.getMonth(),clampDay(nx.getFullYear(),nx.getMonth())); }
+  if($('s-fdue')) $('s-fdue').value=ymd(d);
   if($('s-ftype')) $('s-ftype').value='full';
   if($('s-finst-wrap')) $('s-finst-wrap').style.display='none';
   if($('s-finst-count')) $('s-finst-count').value='2';
@@ -2269,7 +2338,7 @@ function saveStu(){
   const feeCat='Tuition';
   const instCount=parseInt(($('s-finst-count')||{}).value)||2;
   const today=new Date(); today.setHours(0,0,0,0);
-  const dueDt=dueDate?new Date(dueDate):null;
+  const dueDt=dueDate?parseDate(dueDate):null;
   if(dueDt) dueDt.setHours(0,0,0,0);
   const isOverdue=dueDt&&dueDt<today;
   const autoStatus=isOverdue?'Overdue':'Pending';
@@ -2312,17 +2381,18 @@ function saveStu(){
       for(let i=0;i<instCount;i++){
         feeRC++;
         const instAmt=i===instCount-1?perAmt+remainder:perAmt;
-        const instDue=new Date(baseDate.getFullYear(),baseDate.getMonth()+(i*interval),baseDate.getDate());
-        const instDueStr=instDue.toISOString().slice(0,10);
+        const instDue=addMonths(baseDate, i*interval);
+        const instDueStr=ymd(instDue);
         const instOverdue=instDue<today;
         D.fees.push({
           student:s.name,roll:s.roll,sem:s.sem,
-          amt:instAmt,date:'-',method:'-',
+          amt:instAmt,paidAmt:0,date:'-',method:'-',
           receipt:'INST-'+feeRC,
           status:instOverdue?'Overdue':'Pending',
           dueDate:instDueStr,
           isInstalment:true,
           planId:planId,
+          instIdx:i,
           instPart:(i+1)+'/'+instCount,
           instMonth:months[instDue.getMonth()]+' '+instDue.getFullYear(),
           instTotal:feeAmt,
@@ -2739,7 +2809,7 @@ function rFees(){
     let dueDateDisplay='—';
     if(f.dueDate){
       const today=new Date(); today.setHours(0,0,0,0);
-      const due=new Date(f.dueDate); due.setHours(0,0,0,0);
+      const due=parseDate(f.dueDate); due.setHours(0,0,0,0);
       const diffDays=Math.ceil((due-today)/(1000*60*60*24));
       if(f.status==='Paid'){
         dueDateDisplay=`<span style="color:var(--s4);font-size:12px">${f.dueDate}</span>`;
@@ -2811,7 +2881,7 @@ function rFees(){
     let dueDateDisplay='—';
     if(!allPaid && repRow.dueDate){
       const today=new Date(); today.setHours(0,0,0,0);
-      const due=new Date(repRow.dueDate); due.setHours(0,0,0,0);
+      const due=parseDate(repRow.dueDate); due.setHours(0,0,0,0);
       const diffDays=Math.ceil((due-today)/(1000*60*60*24));
       if(diffDays<0){
         dueDateDisplay=`<span style="color:var(--rd);font-weight:700;font-size:12px">⚠️ ${repRow.dueDate}<br><span style="font-size:10px">${Math.abs(diffDays)} days overdue</span></span>`;
@@ -2931,11 +3001,13 @@ function delFee(i){
   const fee=D.fees[i];
   if(!fee){toast('Record not found');return;}
   if(!confirm('Delete fee record for '+fee.student+'?')) return;
-  const linkedTx=D.tx.find(t=>t.srcType==='fee'&&t.srcIdx===i);
+  // A fee can now have several ledger lines (one per logged payment), so void
+  // all of them, not just the first.
+  const linkedTx=D.tx.filter(t=>t.srcType==='fee'&&t.srcIdx===i);
   auditLog('action','Fee deleted: '+fee.student+' Rs '+fee.amt);
   D.fees.splice(i,1);
   buildTx();rFees();rTx();rDash();rStudents();
-  if(linkedTx)auditLog('action','Transaction voided: '+linkedTx.id+' (Rs '+fmt(linkedTx.amt)+') — removed as linked fee record was deleted');
+  linkedTx.forEach(t=>auditLog('action','Transaction voided: '+t.id+' (Rs '+fmt(t.amt)+') — removed as linked fee record was deleted'));
   toast('Fee record deleted');
 }
 function sendReminders(){
@@ -3394,7 +3466,7 @@ function saveTransportFee(){
   if(!due){toast('❌ Due date is required');return;}
   const statusSel=$('tf-status').value;
   const today=new Date(); today.setHours(0,0,0,0);
-  const dueDt=new Date(due); dueDt.setHours(0,0,0,0);
+  const dueDt=parseDate(due); dueDt.setHours(0,0,0,0);
   const status=statusSel==='Paid'?'Paid':(dueDt<today?'Overdue':'Pending');
   if(isEdit){
     const t=D.transportFees[editIdx];
@@ -3556,7 +3628,7 @@ function confirmBulkFee(){
   if(!confirm(confirmMsg))return;
 
   const today=new Date(); today.setHours(0,0,0,0);
-  const dueDt=new Date(due); dueDt.setHours(0,0,0,0);
+  const dueDt=parseDate(due); dueDt.setHours(0,0,0,0);
   const st=dueDt<today?'Overdue':'Pending';
 
   let added=0, skipped=0, merged=0;
@@ -3684,7 +3756,7 @@ function saveFee(){
 
     D.feePayments.push({
       paymentId:'PMT-'+feeRC, roll:stuRoll, student:stuName,
-      instPart:f.instPart, instTotal:f.instTotal, voucherRef:f.receipt,
+      planId:f.planId, instPart:f.instPart, instTotal:f.instTotal, voucherRef:f.receipt,
       amount:payNow, date:payDate, method, reference:receipt,
       receivedBy:(D.currentUser&&D.currentUser.name)||'System', status:'Success'
     });
@@ -3826,6 +3898,56 @@ function saveFeeInstalments(){
   const sem=$('fsm').value;
   if(!stuName||!stuRoll||!fa){toast('Student and Amount are required');return;}
 
+  // ── Pending fines folded into the total ──────────────────────────────────
+  // applyPendingFinesToFeeModal() inflates #fa by the student's unpaid fines so
+  // they can be collected together. saveFee() settles them when the fee is
+  // marked Paid, or backs the amount out when it isn't — but an instalment plan
+  // collects nothing today, so leaving the fine baked into the plan total would
+  // bill it once inside the plan AND leave the fine Pending (to be folded in
+  // again next time). Back it out, re-split the instalments, and let the admin
+  // confirm the corrected figures rather than silently changing what they see.
+  if(_feeIncludedFineIds.length){
+    // Every id in this list was UNPAID when its amount was folded into #fa, so
+    // the amount is baked into the displayed total regardless of the fine's
+    // status now — back it out unconditionally. (saveFee() skips already-Paid
+    // fines because that same save is what settles them; nothing is settled
+    // here.)
+    const fineSum=_feeIncludedFineIds.reduce((sum,fid)=>{
+      const fine=D.fines.find(x=>x.fineId===fid);
+      return fine?sum+(Number(fine.amt)||0):sum;
+    },0);
+    _feeIncludedFineIds=[];
+    const fnote=$('fee-fine-note'); if(fnote) fnote.style.display='none';
+    if(fineSum>0){
+      $('fa').value=Math.max(0,fa-fineSum);
+      feeGenInstalments();
+      toast('ℹ️ Rs '+fineSum.toLocaleString()+' of pending fines was removed from the total — fines are collected separately, not through an instalment plan. Please review the amounts and save again.');
+      return;
+    }
+  }
+
+  // ── EDIT MODE ────────────────────────────────────────────────────────────
+  // This function used to ignore feeEditIdx completely: it pushed N brand-new
+  // instalment records while the record being edited stayed in place, so the
+  // student ended up billed twice (and editing a record that was already an
+  // instalment produced a second overlapping plan).
+  const editIdx=parseInt(($('feeEditIdx')||{}).value);
+  const editing=(editIdx>=0)?D.fees[editIdx]:null;
+  if(editing&&editing.isInstalment){
+    toast('❌ This record is already part of an instalment plan — edit the instalments themselves instead of creating a new plan');
+    return;
+  }
+  // Converting a record that already has money against it (or that settles a
+  // disciplinary fine) would silently discard that payment/link.
+  if(editing&&feePaidAmt(editing)>0){
+    toast('❌ A payment is already recorded on this fee — it cannot be converted into an instalment plan');
+    return;
+  }
+  if(editing&&editing.linkedFineId){
+    toast('❌ This record is linked to a disciplinary fine — it cannot be split into instalments');
+    return;
+  }
+
   // Read the N admin-entered amounts + due dates and validate before saving
   // anything — the system must NEVER accept installments whose sum doesn't
   // match the total fee (see the live validator wired to these same inputs
@@ -3842,11 +3964,19 @@ function saveFeeInstalments(){
 
   const today=new Date(); today.setHours(0,0,0,0);
   const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  // Converting a single (non-instalment) record into a plan REPLACES it —
+  // splice it out first so the same fee is not billed twice. Safe here: all
+  // validation above has already passed and the new rows are pushed below.
+  if(editing&&!editing.isInstalment){
+    const eiEl=$('feeEditIdx'); if(eiEl) eiEl.value='-1'; // clear BEFORE the splice
+    D.fees.splice(editIdx,1);
+    auditLog('action','Fee record converted into a '+count+'-part instalment plan: '+stuName+' — Rs '+fa);
+  }
   // Unique id per plan — see note in the student-add instalment branch above.
   const planId=stuRoll+'-'+Date.now()+'-'+Math.floor(Math.random()*1000);
   for(let i=0;i<count;i++){
     feeRC++;
-    const dueDate=new Date(dueDates[i]);
+    const dueDate=parseDate(dueDates[i]); // local midnight, never UTC
     const isOverdue=dueDate<today;
     const monthLabel=months[dueDate.getMonth()]+' '+dueDate.getFullYear();
     D.fees.push({
@@ -3893,6 +4023,7 @@ function openAddFee(){
   $('frc').value='';
   $('fInstCheck').checked=false;
   feeToggleInstalment(false);
+  const instWrapAdd=$('fInstToggleWrap'); if(instWrapAdd) instWrapAdd.style.display='block';
   feeStep(1);
   showMo('addFee');
 }
@@ -3900,6 +4031,12 @@ function openAddFee(){
 function openEditFee(idx){
   if(!requirePerm('canEdit','edit fee'))return;
   const f=D.fees[idx];
+  // Clear any pending-fine state left behind by an abandoned Add Fee session.
+  // Without this, _feeIncludedFineIds still lists fines that were folded into
+  // the OTHER modal's total, and saveFee()/saveFeeInstalments() would back that
+  // amount out of this record's total, under-billing the student.
+  _feeIncludedFineIds=[];
+  const fnoteEdit=$('fee-fine-note'); if(fnoteEdit) fnoteEdit.style.display='none';
   _feeSelectedStu=D.students.find(s=>s.roll===f.roll)||{name:f.student,roll:f.roll,id:'',dept:'',sem:f.sem,cls:''};
   $('feeEditIdx').value=idx;
   $('feeMoTitle').textContent='✏️ Edit Fee Record';
@@ -3913,6 +4050,11 @@ function openEditFee(idx){
   $('fdd').value=f.dueDate||'';
   $('fInstCheck').checked=false;
   feeToggleInstalment(false);
+  // A record that is ALREADY part of a plan must not be able to spawn another
+  // plan from this modal — that used to push N brand-new records while this
+  // one stayed in place, i.e. the student got billed twice.
+  const instWrapEdit=$('fInstToggleWrap');
+  if(instWrapEdit) instWrapEdit.style.display=f.isInstalment?'none':'block';
 
   if(f.isInstalment){
     // Instalments use partial-payment entry — status is DERIVED from the
@@ -3986,7 +4128,7 @@ function feeShowInstPlan(roll, instTotal){
     const status=feeComputeStatus(f);
     const isPaidRow=status==='Paid';
     const isOvr=status.includes('Overdue');
-    const due=f.dueDate?new Date(f.dueDate):null;
+    const due=f.dueDate?parseDate(f.dueDate):null;
     if(due) due.setHours(0,0,0,0);
     const diffDays=due?Math.ceil((due-today)/(1000*60*60*24)):null;
     const rowPaid=feePaidAmt(f);
@@ -4117,8 +4259,8 @@ function feeGetInstCount(){
 function feeGenInstalments(){
   const fa=parseInt($('fa').value)||0;
   const count=feeGetInstCount();
-  const firstDueDateStr=$('fdd').value||new Date().toISOString().slice(0,10);
-  const firstDue=new Date(firstDueDateStr);
+  const firstDueDateStr=$('fdd').value||isoDate();
+  const firstDue=parseDate(firstDueDateStr);
   const cls=_feeSelectedStu?((_feeSelectedStu.cls||'')):'';
   const interval=getInstInterval(cls,count);
   $('fInst-total').textContent='Rs '+fmt(fa);
@@ -4126,8 +4268,8 @@ function feeGenInstalments(){
   const suggestedRem=fa-(suggestedPer*count);
   $('fInst-per').textContent='Suggested: Rs '+fmt(suggestedPer)+' × '+count+' (adjust freely below)';
   $('fInstRows').innerHTML=Array.from({length:count},(_,i)=>{
-    const dueDate=new Date(firstDue.getFullYear(),firstDue.getMonth()+(i*interval),firstDue.getDate());
-    const dueDateStr=dueDate.toISOString().slice(0,10);
+    const dueDate=addMonths(firstDue, i*interval);
+    const dueDateStr=ymd(dueDate);
     const suggestedAmt=i===count-1?suggestedPer+suggestedRem:suggestedPer;
     return`<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--s0);border:1px solid var(--s2);border-radius:var(--rads)">
       <div style="width:28px;height:28px;border-radius:50%;background:var(--g5);color:#fff;font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</div>
@@ -4209,7 +4351,7 @@ function printInstalmentVouchers(roll, instTotal, mode){
     const paid=feePaidAmt(f);
     const remaining=feeRemainingAmt(f);
     const voucherNo=getOrAssignVoucherNo(f);
-    const dueFmtd=f.dueDate?new Date(f.dueDate).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}):'—';
+    const dueFmtd=f.dueDate?parseDate(f.dueDate).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}):'—';
     const qrPayload=`VCH:${voucherNo}|ROLL:${roll}|INST:${f.instPart}|AMT:${f.amt}|PAID:${paid}`;
     const isPaid=status==='Paid';
 
@@ -4608,7 +4750,7 @@ function printVoucher(idx){
 
   const todayRaw   = new Date();
   const todayClean = new Date(todayRaw); todayClean.setHours(0,0,0,0);
-  const dueDateObj = f.dueDate ? new Date(f.dueDate) : null;
+  const dueDateObj = f.dueDate ? parseDate(f.dueDate) : null;
   if(dueDateObj) dueDateObj.setHours(0,0,0,0);
 
   const isOverdue = dueDateObj && dueDateObj < todayClean;
@@ -4731,7 +4873,7 @@ function printVoucher(idx){
   let scheduleRows = '';
   if(isInstalment){
     allInst.forEach((inst, i) => {
-      const instDue = inst.dueDate ? new Date(inst.dueDate) : null;
+      const instDue = inst.dueDate ? parseDate(inst.dueDate) : null;
       if(instDue) instDue.setHours(0,0,0,0);
       const iOvr    = instDue && instDue < todayClean && inst.status !== 'Paid';
       const isPaid  = inst.status === 'Paid';
@@ -5075,7 +5217,7 @@ function printTransportVoucher(idx){
 
   const todayRaw   = new Date();
   const todayClean = new Date(todayRaw); todayClean.setHours(0,0,0,0);
-  const dueDateObj = t.dueDate ? new Date(t.dueDate) : null;
+  const dueDateObj = t.dueDate ? parseDate(t.dueDate) : null;
   if(dueDateObj) dueDateObj.setHours(0,0,0,0);
   const isOverdue = t.status==='Overdue' || (dueDateObj && dueDateObj < todayClean && t.status!=='Paid');
   const diffDays  = dueDateObj ? Math.ceil((dueDateObj - todayClean)/(1000*60*60*24)) : null;
@@ -7189,7 +7331,7 @@ function rpClearDateFilter(){
 // Helper: date string ko parse karke Date return karo
 function _rpParseDate(str){
   if(!str||str==='-')return null;
-  var d=new Date(str);
+  var d=parseDate(str); // yyyy-mm-dd is parsed as LOCAL midnight, never UTC
   if(!isNaN(d))return d;
   var p=str.trim().split(' ');
   if(p.length>=3){d=new Date(p[1]+' '+p[0]+' '+p[2]);if(!isNaN(d))return d;}
@@ -7208,8 +7350,10 @@ function _rpDateInRange(dateStr){
     var dLabel=d.toLocaleString('default',{month:'long',year:'numeric'});
     return dLabel===f.month;
   }
-  if(f.from){var fd=new Date(f.from);if(d<fd)return false;}
-  if(f.to){var td=new Date(f.to);td.setHours(23,59,59);if(d>td)return false;}
+  // parseDate keeps a yyyy-mm-dd bound at LOCAL midnight; new Date() would make
+  // it UTC midnight and silently drop records dated on the From date itself.
+  if(f.from){var fd=parseDate(f.from);if(d<fd)return false;}
+  if(f.to){var td=parseDate(f.to);td.setHours(23,59,59,999);if(d>td)return false;}
   return true;
 }
 
@@ -7224,8 +7368,8 @@ function _rpSalInRange(monthStr){
   // Convert salary month to a mid-month date for range check
   var d=new Date('15 '+monthStr);
   if(isNaN(d))return false;
-  if(f.from){var fd=new Date(f.from);if(d<fd)return false;}
-  if(f.to){var td=new Date(f.to);if(d>td)return false;}
+  if(f.from){var fd=parseDate(f.from);if(d<fd)return false;}
+  if(f.to){var td=parseDate(f.to);td.setHours(23,59,59,999);if(d>td)return false;}
   return true;
 }
 
@@ -7350,7 +7494,7 @@ const TX_PAGE_SIZE=25;
 
 function txParseDate(dateStr){
   if(!dateStr||dateStr==='-')return null;
-  var d=new Date(dateStr);
+  var d=parseDate(dateStr); // yyyy-mm-dd is parsed as LOCAL midnight, never UTC
   if(isNaN(d.getTime())){var p=dateStr.trim().split(' ');if(p.length>=3)d=new Date(p[1]+' '+p[0]+' '+p[2]);}
   return isNaN(d.getTime())?null:d;
 }
@@ -7376,7 +7520,7 @@ function txChronological(){
 
 function openAddTx(){
   $('mtd').value='';$('mtc').value='';$('mta').value=1000;$('mtt').value='Income';
-  $('mtdt').value=new Date().toISOString().slice(0,10);
+  $('mtdt').value=isoDate();
   showMo('addTx');
 }
 function saveManualTx(){
@@ -7431,8 +7575,12 @@ function viewTx(id){
 }
 
 function rTx(){
-  const fromD=TF.from?new Date(TF.from):null;
-  const toD=TF.to?new Date(TF.to):null;
+  // parseDate, not new Date: `new Date('2026-08-22')` is UTC midnight = 05:00
+  // local in Karachi, so entries dated exactly on the From date were filtered
+  // out. The To date covers the whole day.
+  const fromD=TF.from?parseDate(TF.from):null;
+  const toD=TF.to?parseDate(TF.to):null;
+  if(toD) toD.setHours(23,59,59,999);
   let data=D.tx.filter(t=>{
     if(TF.q&&!t.desc.toLowerCase().includes(TF.q)&&!t.id.toLowerCase().includes(TF.q))return false;
     if(TF.ty&&t.type!==TF.ty)return false;
@@ -8230,7 +8378,7 @@ function feeComputeStatus(f){
   const paid=feePaidAmt(f);
   if(paid>=f.amt) return 'Paid';
   const today=new Date(); today.setHours(0,0,0,0);
-  const due=f.dueDate?new Date(f.dueDate):null; if(due) due.setHours(0,0,0,0);
+  const due=f.dueDate?parseDate(f.dueDate):null; if(due) due.setHours(0,0,0,0);
   const overdue=due && due<today;
   if(paid>0) return overdue?'Partial-Overdue':'Partial';
   return overdue?'Overdue':'Pending';
@@ -8300,7 +8448,7 @@ function stuFeePreview(){
   const dueDate=($('s-fdue')||{}).value||'';
   if(!feeAmt||!dueDate){prev.style.display='none';return;}
   const today=new Date(); today.setHours(0,0,0,0);
-  const dueDt=new Date(dueDate); dueDt.setHours(0,0,0,0);
+  const dueDt=parseDate(dueDate); dueDt.setHours(0,0,0,0);
   const isOverdue=dueDt<today;
   const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -8315,12 +8463,12 @@ function stuFeePreview(){
     html+='<div style="display:flex;flex-wrap:wrap;gap:6px">';
     for(let i=0;i<instCount;i++){
       const amt=i===instCount-1?perAmt+remainder:perAmt;
-      const instDue=new Date(dueDt.getFullYear(),dueDt.getMonth()+(i*interval),dueDt.getDate());
+      const instDue=addMonths(dueDt, i*interval);
       const instOverdue=instDue<today;
       html+=`<div style="background:${instOverdue?'#fee2e2':'#fff'};border:1px solid ${instOverdue?'#fca5a5':'var(--g1)'};border-radius:7px;padding:7px 10px;flex:1;min-width:90px;text-align:center">
         <div style="font-size:11px;font-weight:700;color:${instOverdue?'var(--rd)':'var(--g7)'}">${instOverdue?'⚠️ OVERDUE':'📆 Inst '+(i+1)}</div>
         <div style="font-size:14px;font-weight:800;color:var(--s6);margin:2px 0">Rs ${amt.toLocaleString()}</div>
-        <div style="font-size:10px;color:var(--s4)">${instDue.toISOString().slice(0,10)}</div>
+        <div style="font-size:10px;color:var(--s4)">${ymd(instDue)}</div>
       </div>`;
     }
     html+='</div>';
@@ -8375,7 +8523,7 @@ function feeRollLookup(val){
     html+='<div style="font-size:11px;font-weight:700;color:var(--s5);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Pending / Overdue Fees</div>';
     stuFees.forEach((f,i)=>{
       const idx=D.fees.indexOf(f);
-      const dueDt=f.dueDate?new Date(f.dueDate):null;
+      const dueDt=f.dueDate?parseDate(f.dueDate):null;
       if(dueDt) dueDt.setHours(0,0,0,0);
       const isOvr=dueDt&&dueDt<today;
       const diffDays=dueDt?Math.ceil((dueDt-today)/(1000*60*60*24)):null;
@@ -8407,6 +8555,12 @@ function feeRollCollect(feeIdx, roll){
   const stu=D.students.find(s=>s.roll===roll);
   const fee=D.fees[feeIdx];
   if(!stu||!fee) return;
+
+  // Instalment rows must go through the partial-payment editor — same rule as
+  // quickCollect(). This shortcut's "jump straight to full-paid" path never
+  // filled in the Amount Being Paid Now field, and it left the Instalment Plan
+  // checkbox visible, from where a duplicate plan could be created.
+  if(fee.isInstalment){ openEditFee(feeIdx); return; }
 
   openAddFee();
 

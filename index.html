@@ -1412,7 +1412,7 @@
           <input id="frc" placeholder="Auto-generated if left blank" style="width:100%;padding:10px 13px;border:1.5px solid var(--s2);border-radius:var(--rads);font-size:14px;outline:none;font-family:inherit">
         </div>
         <!-- Instalment Toggle -->
-        <div style="background:var(--s1);border:1.5px solid var(--s2);border-radius:var(--rads);padding:12px 14px;margin-top:4px">
+        <div id="fInstToggleWrap" style="background:var(--s1);border:1.5px solid var(--s2);border-radius:var(--rads);padding:12px 14px;margin-top:4px">
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
             <input type="checkbox" id="fInstCheck" onchange="feeToggleInstalment(this.checked)" style="width:16px;height:16px;accent-color:var(--g5)">
             <div>
@@ -2010,10 +2010,10 @@
     <div class="quick-g">
       <div class="rc" onclick="closeMo('quickAdd');openAddStu()"><div class="ri">🎓</div><h4>Student</h4></div>
       <div class="rc" onclick="closeMo('quickAdd');openAddEmp()"><div class="ri">👤</div><h4>Employee</h4></div>
-      <div class="rc" onclick="closeMo('quickAdd');showMo('addFee')"><div class="ri">💳</div><h4>Fee</h4></div>
-      <div class="rc" onclick="closeMo('quickAdd');showMo('addExp')"><div class="ri">📁</div><h4>Expense</h4></div>
+      <div class="rc" onclick="closeMo('quickAdd');openAddFee()"><div class="ri">💳</div><h4>Fee</h4></div>
+      <div class="rc" onclick="closeMo('quickAdd');_syncCatDropdowns();showMo('addExp')"><div class="ri">📁</div><h4>Expense</h4></div>
       <div class="rc" onclick="closeMo('quickAdd');openAddSal()"><div class="ri">💰</div><h4>Salary</h4></div>
-      <div class="rc" onclick="closeMo('quickAdd');showMo('addBud')"><div class="ri">📅</div><h4>Budget</h4></div>
+      <div class="rc" onclick="closeMo('quickAdd');openAddBud()"><div class="ri">📅</div><h4>Budget</h4></div>
     </div>
     <div class="mo-acts"><button class="mo-cancel" onclick="closeMo('quickAdd')">Close</button></div>
   </div>
