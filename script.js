@@ -2613,9 +2613,68 @@ function printEmp(){
    FEES
 ══════════════════════════════════════════════════ */
 let FF={q:'',st:'',mt:'',gn:'',cls:'',sec:''};
-let feeRC=1010;
-let voucherRC=5001; // Persistent voucher counter — increments each time a voucher is printed
-let instVoucherRC=1; // Persistent counter for the instalment voucher scheme (FEE-YYYY-000001), any N — never reused
+/* ── Receipt & voucher counters ──────────────────────────────────────────
+   feeRC / voucherRC / instVoucherRC used to be plain `let` variables, so they
+   were NOT part of D and never reached localStorage. Every page reload
+   restarted numbering at REC-1011 / VCH-05001 / FEE-YYYY-000001, which handed
+   the same receipt and voucher numbers to different students.
+   They now live inside D.seq — which saveData()/loadPersistedData() already
+   persist, exactly how the fines (D.seq.fine) and transport fee (D.seq.tf)
+   modules number themselves. The accessors below keep every existing
+   `feeRC++` / `++feeRC` / `voucherRC++` call site working unchanged. */
+
+// Highest number already used in a set of existing IDs, so upgrading a live
+// dataset never re-issues a number that is already printed on a receipt.
+function _maxNumSuffix(list,re){
+  let max=0;
+  (list||[]).forEach(v=>{
+    const m=re.exec(String(v||''));
+    if(m){ const n=parseInt(m[1],10); if(!isNaN(n)&&n>max) max=n; }
+  });
+  return max;
+}
+
+// Seeded lazily (not at load time) so it also survives a data import/restore
+// that replaces D.seq wholesale.
+function ensureFeeCounters(){
+  if(!D.seq||typeof D.seq!=='object') D.seq={};
+  if(D.seq.rc==null){
+    // feeRC holds the LAST used number (call sites do ++feeRC / feeRC++ first)
+    const used=[];
+    (D.fees||[]).forEach(f=>{ if(f&&f.receipt) used.push(f.receipt); });
+    (D.feePayments||[]).forEach(p=>{ if(!p)return; if(p.receipt) used.push(p.receipt); if(p.paymentId) used.push(p.paymentId); });
+    D.seq.rc=Math.max(1010,_maxNumSuffix(used,/^(?:REC|INST|FEE|FIN-RCPT|PMT)-(\d+)$/i));
+  }
+  // voucherRC / instVoucherRC hold the NEXT number to issue (post-increment)
+  if(D.seq.vch==null){
+    D.seq.vch=Math.max(5001,_maxNumSuffix((D.fees||[]).map(f=>f&&f.challanNo),/^VCH-0*(\d+)$/i)+1);
+  }
+  if(D.seq.instVch==null){
+    D.seq.instVch=Math.max(1,_maxNumSuffix((D.fees||[]).map(f=>f&&f.voucherNo),/-(\d{6})$/)+1);
+  }
+}
+
+// Counter writes are coalesced: the instalment loops bump feeRC once per row,
+// and a full JSON.stringify(D) per bump would be wasteful.
+let _seqSaveTimer=null;
+function _saveSeqSoon(){
+  if(_seqSaveTimer)return;
+  _seqSaveTimer=setTimeout(()=>{ _seqSaveTimer=null; try{saveData();}catch(e){} },300);
+}
+
+function _defineFeeCounter(name,key){
+  try{
+    Object.defineProperty(globalThis,name,{
+      configurable:true,
+      get(){ ensureFeeCounters(); return D.seq[key]; },
+      set(v){ ensureFeeCounters(); D.seq[key]=v; _saveSeqSoon(); }
+    });
+  }catch(e){ console.warn('Could not install counter '+name+':',e); }
+}
+_defineFeeCounter('feeRC','rc');
+_defineFeeCounter('voucherRC','vch');
+_defineFeeCounter('instVoucherRC','instVch');
+
 function nextInstVoucherNo(){
   const yr=new Date().getFullYear();
   return `${D.settings.voucherPrefix||'FEE'}-${yr}-${String(instVoucherRC++).padStart(6,'0')}`;
@@ -3668,36 +3727,49 @@ function saveFee(){
     _feeIncludedFineIds=[];
     const fnote=$('fee-fine-note'); if(fnote) fnote.style.display='none';
   }
-  const f={
+  // Only the fields this modal actually owns. On EDIT this is MERGED into the
+  // existing record instead of replacing it — the old `D.fees[editIdx]=f`
+  // silently dropped every field the modal doesn't know about: extraFees,
+  // baseCategory, lateFeeApplied / appliedLateFeeAmt (so a late fee could be
+  // charged twice), voucherNo, txSeq, and the instalment fields.
+  const prev=(isEdit&&D.fees[editIdx])?D.fees[editIdx]:null;
+  const patch={
     student:stuName, roll:stuRoll,
     sem:$('fsm').value,
     amt:amtVal, paidAmt:isPaid?amtVal:0,
     date:isPaid?todayStr():'-',
     method:isPaid?$('fpm').value:'-',
-    receipt:isPaid?($('frc').value.trim()||'REC-'+feeRC):'-',
+    receipt:isPaid?($('frc').value.trim()||(prev&&prev.receipt&&prev.receipt!=='-'?prev.receipt:'REC-'+feeRC)):'-',
     status:status,
-    dueDate:$('fdd').value||'',
-    category:'Tuition'
+    dueDate:$('fdd').value||''
   };
+  // Category is defaulted for NEW records only. Editing must never turn a
+  // bulk-assigned "Lab Fee" / "Sports Fee" record back into "Tuition".
+  if(!prev||!prev.category) patch.category='Tuition';
   // Preserve the disciplinary-fine link if editing/collecting a Fine-category record
-  if(isEdit&&D.fees[editIdx]&&D.fees[editIdx].linkedFineId){
-    f.category='Fine';
-    f.linkedFineId=D.fees[editIdx].linkedFineId;
+  if(prev&&prev.linkedFineId){
+    patch.category='Fine';
+    patch.linkedFineId=prev.linkedFineId;
   }
   let savedIdx=-1;
+  let f;
   if(isEdit){
-    D.fees[editIdx]=f;
+    f=Object.assign(D.fees[editIdx],patch); // merge, don't replace
     savedIdx=editIdx;
     auditLog('action','Fee updated: '+stuName);
     if(isPaid){
       const stu=D.students.find(s=>s.roll===stuRoll);
       if(stu){
+        // The edited record is already updated in place, so a plain check is
+        // enough here (the old `xi===editIdx` test compared an index of the
+        // FILTERED array against an index into D.fees — wrong record).
         const allStudentFees=D.fees.filter(x=>x.roll===stuRoll);
-        const allPaid=allStudentFees.every((x,xi)=>x.status==='Paid'||(xi===editIdx));
+        const allPaid=allStudentFees.every(x=>x.status==='Paid');
         if(allPaid) stu.status='Paid';
       }
     }
   } else {
+    f=patch;
     D.fees.push(f);
     savedIdx=D.fees.length-1;
     auditLog('action','Fee recorded: '+stuName+' Rs '+f.amt);
@@ -4110,7 +4182,10 @@ function feeValidateInstSum(){
    mode: 'all' | 'paid' | 'remaining'
 ══════════════════════════════════════════════════ */
 function getOrAssignVoucherNo(f){
-  if(!f.voucherNo) f.voucherNo=nextInstVoucherNo();
+  // Persist immediately: the counter's own write-through happens while the
+  // number is still being computed, so without this the assigned voucherNo
+  // could be lost if the tab closed before the next save.
+  if(!f.voucherNo){ f.voucherNo=nextInstVoucherNo(); try{saveData();}catch(e){} }
   return f.voucherNo;
 }
 
@@ -4542,7 +4617,15 @@ function printVoucher(idx){
   const fmtDate = (d) => d ? d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}) : '—';
   const todayFmt = fmtDate(todayRaw);
   const dueFmt   = fmtDate(dueDateObj);
-  const voucherNo = 'VCH-' + String(voucherRC++).padStart(5, '0');
+  // The challan number is issued ONCE and stored on the fee record, so a
+  // re-print shows the same number the student and the bank already hold —
+  // and so D.seq.vch can be re-seeded from saved data (ensureFeeCounters).
+  // Previously every print burned a fresh number and stored nothing.
+  if(!f.challanNo){
+    f.challanNo='VCH-'+String(voucherRC++).padStart(5,'0');
+    try{saveData();}catch(e){}
+  }
+  const voucherNo = f.challanNo;
 
   const academicYear = getAcademicYear();
   const expiryObj    = new Date(todayRaw); expiryObj.setDate(expiryObj.getDate()+30);
@@ -5178,7 +5261,9 @@ function quickCollect(idx){
   $('fdd').value = f.dueDate||'';
   $('fst').value = 'Paid';
   feeStatusChange('Paid');
-  $('frc').value = 'REC-'+Date.now().toString().slice(-5);
+  // Same persisted counter as saveFee (D.seq.rc) — the old
+  // 'REC-'+Date.now().slice(-5) was a different, collision-prone scheme.
+  $('frc').value = 'REC-'+(feeRC+1);
   feeShowSelected(stu);
   $('fstep1-next').disabled=false;
   $('fstep1-next').style.opacity='1';
@@ -8336,7 +8421,9 @@ function feeRollCollect(feeIdx, roll){
   $('fdd').value = fee.dueDate||'';
   $('fst').value = 'Paid';
   feeStatusChange('Paid');
-  $('frc').value = 'REC-'+Date.now().toString().slice(-5);
+  // Same persisted counter as saveFee (D.seq.rc) — the old
+  // 'REC-'+Date.now().slice(-5) was a different, collision-prone scheme.
+  $('frc').value = 'REC-'+(feeRC+1);
   feeShowSelected(stu);
   $('fstep1-next').disabled=false;
   $('fstep1-next').style.opacity='1';
