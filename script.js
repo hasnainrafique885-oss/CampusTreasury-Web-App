@@ -1399,18 +1399,94 @@ function toast(msg){
 
 /* ══════════════════════════════════════════════════
    3-DOTS ACTION MENU HELPERS
+   The dropdown is position:fixed (see .action-dropdown in style.css) so the
+   table wrapper's overflow can never clip it. Coordinates are recomputed here
+   whenever the button moves: opens downward when there is room, flips above the
+   button when there isn't, and always stays inside the viewport left-to-right.
 ══════════════════════════════════════════════════ */
+const AM_GAP=4;      // gap between the ⋯ button and the menu
+const AM_EDGE=8;     // min breathing room from the viewport edges
+const AM_MIN_H=110;  // never shrink the menu below this before scrolling it
+let amOpen=null;     // {btn, dropdown} of the currently open menu
+let amRaf=0;         // animation-frame handle for the follow loop
+let amLastKey='';    // last button geometry, so we only reposition on real moves
+
+function positionActionMenu(btn,dropdown){
+  // Reset to the top-left corner first: a fixed box measured while parked near
+  // a viewport edge would shrink-to-fit against it and report a wrong size.
+  dropdown.style.maxHeight='';
+  dropdown.style.top='0px';
+  dropdown.style.left='0px';
+
+  const r=btn.getBoundingClientRect();
+  const vw=window.innerWidth, vh=window.innerHeight;
+  const mw=dropdown.offsetWidth;
+  let mh=dropdown.offsetHeight;
+
+  // Vertical: prefer below, flip above only when below doesn't fit and above is roomier.
+  const below=vh-r.bottom-AM_GAP-AM_EDGE;
+  const above=r.top-AM_GAP-AM_EDGE;
+  const flipUp=mh>below && above>below;
+  const room=flipUp?above:below;
+  if(mh>room){
+    dropdown.style.maxHeight=Math.max(room,AM_MIN_H)+'px';
+    mh=dropdown.offsetHeight;
+  }
+  let top=flipUp ? r.top-AM_GAP-mh : r.bottom+AM_GAP;
+  top=Math.min(Math.max(top,AM_EDGE),Math.max(vh-mh-AM_EDGE,AM_EDGE));
+
+  // Horizontal: right-aligned to the button (as before), left-aligned if that
+  // would overflow the left edge, then hard-clamped inside the viewport.
+  let left=r.right-mw;
+  if(left<AM_EDGE) left=Math.min(r.left,vw-mw-AM_EDGE);
+  left=Math.min(Math.max(left,AM_EDGE),Math.max(vw-mw-AM_EDGE,AM_EDGE));
+
+  dropdown.style.top=Math.round(top)+'px';
+  dropdown.style.left=Math.round(left)+'px';
+}
+
 function toggleActionMenu(btn){
   const dropdown=btn.nextElementSibling;
+  if(!dropdown||!dropdown.classList.contains('action-dropdown')) return;
   const isOpen=dropdown.classList.contains('open');
-  closeAllMenus();
-  if(!isOpen) dropdown.classList.add('open');
+  closeAllMenus();                        // also closes any other module's menu
+  if(isOpen) return;                       // same button clicked again → just close
+  dropdown.classList.add('open');
+  amOpen={btn,dropdown};
+  amLastKey='';
+  positionActionMenu(btn,dropdown);
+  if(!amRaf) amRaf=requestAnimationFrame(syncActionMenu);
 }
 function closeAllMenus(){
-  document.querySelectorAll('.action-dropdown.open').forEach(d=>d.classList.remove('open'));
+  document.querySelectorAll('.action-dropdown.open').forEach(d=>{
+    d.classList.remove('open');
+    d.style.maxHeight='';
+  });
+  amOpen=null;
+  amLastKey='';
+  if(amRaf){cancelAnimationFrame(amRaf);amRaf=0;}
+}
+// Keep the open menu glued to its button, and drop it once that button scrolls
+// out of sight or its row gets re-rendered away. This runs on an animation
+// frame rather than scroll/resize events on purpose: scroll events don't bubble
+// from inner containers (.tsw, modal bodies) and can be coalesced away entirely,
+// which would leave the menu stranded. The rect read is cheap and the expensive
+// reposition only happens when the button has actually moved.
+function syncActionMenu(){
+  if(!amOpen){amRaf=0;amLastKey='';return;}
+  const {btn,dropdown}=amOpen;
+  if(!btn.isConnected||!dropdown.isConnected){closeAllMenus();return;}
+  const r=btn.getBoundingClientRect();
+  if(!r.width||r.bottom<0||r.top>window.innerHeight){closeAllMenus();return;}
+  const key=r.top+'|'+r.left+'|'+r.right+'|'+window.innerWidth+'x'+window.innerHeight;
+  if(key!==amLastKey){amLastKey=key;positionActionMenu(btn,dropdown);}
+  amRaf=requestAnimationFrame(syncActionMenu);
 }
 document.addEventListener('click',function(e){
   if(!e.target.closest('.action-menu-wrap')) closeAllMenus();
+});
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&amOpen) closeAllMenus();
 });
 
 /* ══════════════════════════════════════════════════
