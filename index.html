@@ -400,7 +400,7 @@
               <option value="Male">Boys Only</option>
               <option value="Female">Girls Only</option>
             </select>
-            <select class="fs" onchange="fSSt(this.value)"><option value="">All Status</option><option>Paid</option><option>Pending</option><option>Overdue</option></select>
+            <select class="fs" onchange="fSSt(this.value)"><option value="">All Status</option><option>Paid</option><option>Pending</option><option value="Partial">Partially Paid</option><option>Overdue</option></select>
             <select class="fs" id="filter-cls" onchange="fSCls(this.value)">
               <option value="">All Classes</option>
             </select>
@@ -570,7 +570,7 @@
         <div class="card">
           <div class="frow">
             <input class="fi" placeholder="🔍  Search student, roll no, or route…" oninput="tfF(this.value)">
-            <select class="fs" onchange="tfFSt(this.value)"><option value="">All Status</option><option>Paid</option><option>Pending</option><option>Overdue</option></select>
+            <select class="fs" onchange="tfFSt(this.value)"><option value="">All Status</option><option>Paid</option><option value="Partial">Partially Paid</option><option>Pending</option><option>Overdue</option></select>
             <select class="fs" onchange="tfFGn(this.value)"><option value="">All Campus</option><option value="Male">👦 Boys Campus</option><option value="Female">👧 Girls Campus</option></select>
             <select class="fs" id="transport-filter-cls" onchange="tfFCls(this.value)"><option value="">All Classes</option></select>
             <select class="fs" id="transport-filter-sec" onchange="tfFSec(this.value)"><option value="">All Sections</option></select>

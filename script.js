@@ -128,6 +128,14 @@ const D = {
     bankAccountTitle:'Superior College',
     bankAccountNo:'0123456789',
     bankIBAN:'PK00MCB0000000123456789',
+    // Mobile-wallet numbers and the accounts-office helpline used to be typed
+    // straight into the fee voucher's HTML, so they could not be changed from
+    // Settings and disagreed with the instalment voucher. Same defaults as the
+    // old hard-coded values, so nothing printed changes today.
+    bankJazzCash:'0300-8001234',
+    bankEasyPaisa:'0321-7001234',
+    accountsPhone:'042-35761234',
+    officeHours:'9am–3pm (Mon–Sat)',
     customerCode:'SC',
     voucherPrefix:'FEE',
     // ── Default voucher instructions — configurable, not permanently
@@ -347,9 +355,13 @@ function autoCheckOverdue() {
 
   let tfChanged = 0;
   D.transportFees.forEach(t => {
-    if (t.status !== 'Pending' || !t.dueDate) return;
-    const due = parseDate(t.dueDate); due.setHours(0,0,0,0);
-    if (due < today) { t.status = 'Overdue'; tfChanged++; }
+    if (!t.dueDate) return;
+    // Same derive-from-money rule as fees: a record with a part payment becomes
+    // Partial-Overdue rather than being skipped for not being exactly 'Pending'.
+    const derived = tfComputeStatus(t);
+    if (derived === 'Paid' || t.status === derived) return;
+    if (derived !== 'Overdue' && derived !== 'Partial-Overdue') return;
+    t.status = derived; tfChanged++;
   });
 
   if (changed > 0 || tfChanged > 0) {
@@ -484,7 +496,18 @@ function saveData(){
   }catch(e){ console.warn('Could not save data to localStorage:',e); }
 }
 
+// Snapshot the built-in settings defaults BEFORE the persisted copy replaces
+// D.settings wholesale (loadPersistedData does `D[k]=saved.D[k]`). Without this,
+// any settings key added to the defaults AFTER a user's data was first saved
+// comes back undefined and prints as "undefined" on their vouchers.
+const _SETTINGS_DEFAULTS=JSON.parse(JSON.stringify(D.settings));
 loadPersistedData();
+// Fill only the keys the saved copy predates — never overwrite a value the user
+// has actually customised.
+if(!D.settings||typeof D.settings!=='object') D.settings={};
+Object.keys(_SETTINGS_DEFAULTS).forEach(k=>{
+  if(D.settings[k]===undefined||D.settings[k]===null||D.settings[k]==='') D.settings[k]=_SETTINGS_DEFAULTS[k];
+});
 // The ledger is DERIVED data, but saveData() serialises the whole of D, so a
 // stale D.tx comes back with the restored state. Rebuild it from the freshly
 // loaded records — otherwise the buildTx() call above (which ran against the
@@ -1498,7 +1521,7 @@ const EXPORT_CFG = {
     headers:['Student ID','Name','Father Name','Roll No','Gender','Department','Class','Section','Semester','Fee (Rs)','Scholarship','Outstanding (Rs)','Status','Contact','Address'],
     // Status and outstanding are derived from the fee + transport records; the
     // cached s.status can never say "Partial" and drifts between saves.
-    rows:()=>D.students.map(s=>[s.id||'',s.name,s.father||'',s.roll,s.gender||'',s.dept,s.cls||'',s.section||'',s.sem,s.fee,studentScholarshipLabel(s)||'-',studentOutstanding(s),studentFeeStatus(s),s.contact||'',s.address||'']),
+    rows:()=>D.students.map(s=>[s.id||'',s.name,s.father||'',s.roll,s.gender||'',s.dept,s.cls||'',s.section||'',s.sem,s.fee,studentScholarshipLabel(s)||'-',studentOutstanding(s),feeStatusLabel(studentFeeStatus(s)),s.contact||'',s.address||'']),
     colWidths:[15,22,22,15,10,22,10,8,8,12,20,16,10,15,25]
   },
   employees:{
@@ -2117,11 +2140,22 @@ function setFieldErr(id,msg){
   em.textContent='✗ '+msg;
 }
 
+// The "All Status" dropdown offers Paid / Pending / Partially Paid / Overdue.
+// 'Pending' means "owes, not late yet", 'Overdue' covers a part-paid record whose
+// due date has passed as well — so no student can be invisible under every filter.
+function studentStatusMatches(s,want){
+  const st=studentFeeStatus(s);
+  if(want==='Overdue') return st.indexOf('Overdue')>=0;
+  if(want==='Partial') return st.indexOf('Partial')===0;
+  if(want==='Pending') return st==='Pending';
+  return st===want;
+}
+
 function rStudents(){
   const data=D.students.filter(s=>{
     const q=SF.q;
     return(!q||s.name.toLowerCase().includes(q)||(s.id||'').toLowerCase().includes(q)||s.roll.toLowerCase().includes(q)||(s.father||'').toLowerCase().includes(q))
-      &&(!SF.st||studentFeeStatus(s)===SF.st)
+      &&(!SF.st||studentStatusMatches(s,SF.st))
       &&(!SF.sec||s.section===SF.sec)
       &&(!SF.cls||s.cls===SF.cls)
       &&(!SF.gn||s.gender===SF.gn);
@@ -2135,15 +2169,18 @@ function rStudents(){
   // outstanding — a plain status==='Paid' filter would miss partial cash
   // already received, and status==='Overdue' alone would double-count the
   // paid portion of a partially-paid-but-overdue instalment as still owed.
-  const paidAmt=D.fees.reduce((a,b)=>a+feePaidAmt(b),0)+D.transportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
-  const pendingAmt=D.fees.filter(f=>{const s=feeComputeStatus(f);return s==='Pending'||s==='Partial';}).reduce((a,b)=>a+feeRemainingAmt(b),0)+D.transportFees.filter(t=>t.status==='Pending').reduce((a,b)=>a+b.amt,0);
-  const overdueAmt=D.fees.filter(f=>feeComputeStatus(f).indexOf('Overdue')>=0).reduce((a,b)=>a+feeRemainingAmt(b),0)+D.transportFees.filter(t=>t.status==='Overdue').reduce((a,b)=>a+b.amt,0);
+  const paidAmt=D.fees.reduce((a,b)=>a+feePaidAmt(b),0)+D.transportFees.reduce((a,b)=>a+tfPaidAmt(b),0);
+  const pendingAmt=D.fees.filter(f=>{const s=feeComputeStatus(f);return s==='Pending'||s==='Partial';}).reduce((a,b)=>a+feeRemainingAmt(b),0)+D.transportFees.filter(t=>{const s=tfComputeStatus(t);return s==='Pending'||s==='Partial';}).reduce((a,b)=>a+tfRemainingAmt(b),0);
+  const overdueAmt=D.fees.filter(f=>feeComputeStatus(f).indexOf('Overdue')>=0).reduce((a,b)=>a+feeRemainingAmt(b),0)+D.transportFees.filter(t=>tfComputeStatus(t).indexOf('Overdue')>=0).reduce((a,b)=>a+tfRemainingAmt(b),0);
   const unpaidAmt=pendingAmt+overdueAmt;
   // Head-counts come from studentFeeStatus() (derived from the fee + transport
   // records) rather than the cached s.status, which only gets rewritten when a
   // fee is saved and so went stale after part-payments or transport-only debt.
-  const overdueCount=D.students.filter(s=>studentFeeStatus(s)==='Overdue').length;
-  const pendingCount=D.students.filter(s=>studentFeeStatus(s)==='Pending').length;
+  // Bucket helpers, not === comparisons: a partially-paid student belongs in the
+  // pending count (and a part-paid-and-late one in the overdue count) — with a
+  // literal === 'Pending' they fell out of every card and were counted nowhere.
+  const overdueCount=D.students.filter(studentIsOverdue).length;
+  const pendingCount=D.students.filter(studentIsPendingBucket).length;
   const paidStuCount=D.students.filter(s=>studentFeeStatus(s)==='Paid').length;
   $('s-tot').textContent=D.students.length;
   if($('s-boys'))  $('s-boys').textContent=boysCount;
@@ -2859,6 +2896,17 @@ function ensureFeeCounters(){
   if(D.seq.instVch==null){
     D.seq.instVch=Math.max(1,_maxNumSuffix((D.fees||[]).map(f=>f&&f.voucherNo),/-(\d{6})$/)+1);
   }
+  // Transport voucher / receipt numbers. Both used to be derived from the array
+  // INDEX (TRV-0'+2000+idx+1, TFR-'+(2000+length)), so deleting an earlier
+  // record silently renumbered every voucher after it — a student's printed
+  // slip stopped matching what the office saw. Seeded from what is already
+  // stored so a live dataset never re-issues a printed number.
+  if(D.seq.trv==null){
+    D.seq.trv=Math.max(2001,_maxNumSuffix((D.transportFees||[]).map(t=>t&&t.voucherNo),/^TRV-0*(\d+)$/i)+1);
+  }
+  if(D.seq.tfr==null){
+    D.seq.tfr=Math.max(2001,_maxNumSuffix((D.transportFees||[]).map(t=>t&&t.receipt),/^TFR-0*(\d+)$/i)+1);
+  }
 }
 
 // Counter writes are coalesced: the instalment loops bump feeRC once per row,
@@ -2881,10 +2929,28 @@ function _defineFeeCounter(name,key){
 _defineFeeCounter('feeRC','rc');
 _defineFeeCounter('voucherRC','vch');
 _defineFeeCounter('instVoucherRC','instVch');
+_defineFeeCounter('tfVoucherRC','trv');
+_defineFeeCounter('tfReceiptRC','tfr');
 
 function nextInstVoucherNo(){
   const yr=new Date().getFullYear();
   return `${D.settings.voucherPrefix||'FEE'}-${yr}-${String(instVoucherRC++).padStart(6,'0')}`;
+}
+
+// ── Transport document numbers ───────────────────────────────────────────────
+// Issued ONCE and stored on the record, exactly like the fee voucher's
+// challanNo, so a re-print shows the same number the student already holds and
+// deleting another row can never renumber this one.
+function getOrAssignTfVoucherNo(t){
+  if(!t) return '—';
+  if(!t.voucherNo){
+    t.voucherNo='TRV-'+String(tfVoucherRC++).padStart(5,'0');
+    try{saveData();}catch(e){}
+  }
+  return t.voucherNo;
+}
+function nextTfReceiptNo(){
+  return 'TFR-'+String(tfReceiptRC++).padStart(5,'0');
 }
 
 function rFees(){
@@ -3501,16 +3567,21 @@ function rTransportFee(){
   populateTransportFilterDropdowns();
   const data=D.transportFees.filter(t=>{
     const stu=D.students.find(s=>s.roll===t.roll);
+    // Status filter matches the DERIVED status (what the badge and the voucher
+    // print), so picking "Overdue" also catches a record still stored as
+    // Pending whose due date has passed.
     return(!TFF.q||t.student.toLowerCase().includes(TFF.q)||t.roll.toLowerCase().includes(TFF.q)||(t.route||'').toLowerCase().includes(TFF.q))
-      &&(!TFF.st||t.status===TFF.st)
+      &&(!TFF.st||tfComputeStatus(t)===TFF.st||t.status===TFF.st)
       &&(!TFF.gn||!stu||(stu.gender||'')===TFF.gn)
       &&(!TFF.cls||!stu||stu.cls===TFF.cls)
       &&(!TFF.sec||!stu||stu.section===TFF.sec)
       &&(!TFF.route||t.route===TFF.route);
   });
-  const total=D.transportFees.reduce((a,b)=>a+b.amt,0);
-  const paid=D.transportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
-  const pending=D.transportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0);
+  // Tiles read through the same primitives the vouchers print from, so the
+  // header figures can never disagree with a slip in a parent's hand.
+  const total=D.transportFees.reduce((a,b)=>a+(Number(b&&b.amt)||0),0);
+  const paid=D.transportFees.reduce((a,b)=>a+tfPaidAmt(b),0);
+  const pending=D.transportFees.reduce((a,b)=>a+tfRemainingAmt(b),0);
   if($('tf-total'))  $('tf-total').textContent=fmt(total);
   if($('tf-paid'))   $('tf-paid').textContent=fmt(paid);
   if($('tf-pending'))$('tf-pending').textContent=fmt(pending);
@@ -3524,21 +3595,24 @@ function rTransportFee(){
   }
   tb.innerHTML=data.map(t=>{
     const idx=D.transportFees.indexOf(t);
+    const rowPaid=tfPaidAmt(t), rowRem=tfRemainingAmt(t), rowSt=tfComputeStatus(t);
     return`<tr>
       <td><strong>${t.student}</strong></td>
       <td>${t.roll}</td>
       <td style="font-size:12px;color:var(--s4)">${t.route||'—'}</td>
-      <td><strong>Rs ${fmt(t.amt)}</strong></td>
+      <td><strong>Rs ${fmt(t.amt)}</strong>${rowPaid>0?`<div style="font-size:11px;color:var(--s4)">Paid Rs ${fmt(rowPaid)}${rowRem>0?' · Rem Rs '+fmt(rowRem):''}</div>`:''}</td>
       <td>${t.dueDate||'—'}</td>
-      <td>${bdg(t.status)}</td>
+      <td>${bdg(rowSt)}</td>
       <td style="white-space:nowrap">
         <div class="action-menu-wrap">
           <button class="action-dots-btn" onclick="toggleActionMenu(this)" title="Actions">⋯</button>
           <div class="action-dropdown">
-            ${t.status==='Paid'
-              ?`<button onclick="printTransportVoucher(${idx});closeAllMenus()">🧾 Print Receipt</button>`
+            ${rowSt==='Paid'
+              ?`<button onclick="printTransportVoucher(${idx},'receipt');closeAllMenus()">🧾 Print Receipt</button>
+                <button onclick="printTransportVoucher(${idx},'voucher');closeAllMenus()">🖨️ Print Voucher</button>`
               :`<button onclick="collectTransportFee(${idx});closeAllMenus()">💳 Collect Payment</button>
-                <button onclick="printTransportVoucher(${idx});closeAllMenus()">🖨️ Print Voucher</button>`
+                <button onclick="printTransportVoucher(${idx},'voucher');closeAllMenus()">🖨️ Print Voucher</button>
+                ${rowPaid>0?`<button onclick="printTransportVoucher(${idx},'receipt');closeAllMenus()">🧾 Print Receipt</button>`:''}`
             }
             <button onclick="openEditTransportFee(${idx});closeAllMenus()">✏️ Edit</button>
             <hr>
@@ -3671,9 +3745,16 @@ function saveTransportFee(){
     t.student=stuName;t.roll=stuRoll;t.route=route;t.amt=amt;t.dueDate=due;
     if(statusSel==='Paid'&&!wasPaid){
       t.status='Paid';t.date=todayStr();t.method=t.method&&t.method!=='-'?t.method:'Cash';
-      t.receipt=t.receipt&&t.receipt!=='-'?t.receipt:'TFR-'+(2000+D.transportFees.length);
+      t.receipt=t.receipt&&t.receipt!=='-'?t.receipt:nextTfReceiptNo();
+      t.paidAmt=amt;
     } else if(statusSel!=='Paid'){
       t.status=status;
+      // Moving a record back off "Paid" must also drop the money figure, or
+      // tfPaidAmt would keep reporting it as fully paid.
+      t.paidAmt=0;
+    } else {
+      // Still Paid, amount possibly edited — keep paid in step with payable.
+      t.paidAmt=amt;
     }
     auditLog('action','Transport fee updated: '+stuName);
     toast('✅ Transport fee updated');
@@ -3681,12 +3762,15 @@ function saveTransportFee(){
     D.seq.tf=(D.seq.tf||0)+1;
     const t={tfId:'TF-'+D.seq.tf,student:stuName,roll:stuRoll,route:route,amt:amt,dueDate:due,status:status,
       date:status==='Paid'?todayStr():'-', method:status==='Paid'?'Cash':'-',
-      receipt:status==='Paid'?('TFR-'+(2000+D.transportFees.length+1)):'-'};
+      // paidAmt is the explicit money figure the voucher/receipt prints from.
+      // Older records that predate it fall back through tfPaidAmt(t).
+      paidAmt:status==='Paid'?amt:0,
+      receipt:status==='Paid'?nextTfReceiptNo():'-'};
     D.transportFees.push(t);
     auditLog('action','Transport fee assigned: '+stuName+' — Rs '+amt);
     toast('✅ Transport fee of Rs '+fmt(amt)+' assigned to '+stuName);
   }
-  buildTx();rTransportFee();rDash();
+  buildTx();rTransportFee();rDash();rStudents();
   closeMo('addTransportFee');
   transportDeselectStu();
 }
@@ -3697,9 +3781,12 @@ function collectTransportFee(idx){
   t.status='Paid';
   t.date=todayStr();
   t.method='Cash';
-  t.receipt=t.receipt&&t.receipt!=='-'?t.receipt:'TFR-'+(2000+idx+1);
+  t.paidAmt=Number(t.amt)||0;
+  t.receipt=t.receipt&&t.receipt!=='-'?t.receipt:nextTfReceiptNo();
   auditLog('action','Transport fee collected: '+t.student+' — Rs '+t.amt);
-  buildTx();rTransportFee();rDash();
+  // rStudents() too: the student's outstanding balance and status card are
+  // transport-aware now, so they go stale if only the transport tab refreshes.
+  buildTx();rTransportFee();rDash();rStudents();
   toast('✅ Rs '+fmt(t.amt)+' collected from '+t.student);
 }
 function delTransportFee(idx){
@@ -5004,7 +5091,43 @@ function printInstalmentVouchers(roll, planKey, mode){
     const qrPayload=`VCH:${voucherNo}|ROLL:${roll}|INST:${f.instPart||''}|AMT:${f.amt}|PAID:${paid}|REM:${remaining}|DUE:${f.dueDate||''}`;
     const isPaid=status==='Paid';
 
+    // ── "Instalment X of Y" and "Previously Paid" are DERIVED, never stored ──
+    // `plan.rows` is already sorted by instIdx (see instPlanRows), so this row's
+    // ordinal is its position in that plan and "previously paid" is the money
+    // received against every instalment that comes BEFORE it. Nothing here is a
+    // literal: a 2-part plan says "1 of 2", a 6-part plan says "1 of 6".
+    const seat=plan.rows.indexOf(f);
+    const ordinal=(seat>=0?seat:0)+1;
+    const ofTotal=plan.rows.length;
+    const prevPaid=plan.rows.slice(0,Math.max(0,seat)).reduce((sum,r)=>sum+feePaidAmt(r),0);
+
     const infoRow=(label,val)=>`<div class="iv-row"><span class="iv-lb">${label}</span><span class="iv-vl">${val}</span></div>`;
+    const bigRow=(label,val)=>`<div class="iv-row iv-row-hi"><span class="iv-lb">${label}</span><span class="iv-vl">${val}</span></div>`;
+
+    // Complete instalment schedule, so the student can see the whole plan on the
+    // one slip they are holding — same columns as the receipt's schedule table.
+    const schedule=`
+      <div class="iv-sched-h">Complete Instalment Schedule</div>
+      <table class="iv-sched">
+        <thead><tr><th>#</th><th>Due Date</th><th>Amount</th><th>Paid</th><th>Status</th></tr></thead>
+        <tbody>${plan.rows.map((r,i)=>{
+          const rs=feeComputeStatus(r);
+          const isThis=r===f;
+          return `<tr class="${isThis?'iv-sched-now':''}">
+            <td>${i+1}${isThis?' ◀':''}</td>
+            <td>${r.dueDate?parseDate(r.dueDate).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'2-digit'}):'—'}</td>
+            <td class="iv-num">${(Number(r.amt)||0).toLocaleString()}</td>
+            <td class="iv-num">${feePaidAmt(r).toLocaleString()}</td>
+            <td class="iv-st-${rs.replace('-','')}">${feeStatusLabel(rs)}</td>
+          </tr>`;
+        }).join('')}</tbody>
+        <tfoot><tr>
+          <td colspan="2">Total</td>
+          <td class="iv-num">${plan.totalFee.toLocaleString()}</td>
+          <td class="iv-num">${plan.totalPaid.toLocaleString()}</td>
+          <td>${plan.paidCount}/${ofTotal} paid</td>
+        </tr></tfoot>
+      </table>`;
 
     return `
     <div class="iv-card">
@@ -5017,38 +5140,45 @@ function printInstalmentVouchers(roll, planKey, mode){
         </div>
         <div class="qr-slot" data-qr="${qrPayload}"></div>
       </div>
-      <div class="iv-title">FEE VOUCHER</div>
+      <div class="iv-title">INSTALMENT FEE VOUCHER</div>
+      <div class="iv-instband">INSTALMENT ${ordinal} OF ${ofTotal}</div>
 
       ${infoRow('Customer Code',D.settings.customerCode||'—')}
       ${infoRow('Voucher No.',voucherNo)}
       ${infoRow('Full Name',f.student)}
       ${infoRow('Student ID / Roll No.',stu.id?stu.id+' / '+roll:roll)}
       ${infoRow('Program / Department',(stu.cls||'—')+(stu.dept?' — '+stu.dept:''))}
-      ${infoRow('Semester / Session',(f.sem||'—')+' · '+(D.settings.academicYear||''))}
-      ${infoRow('Instalment',`${f.instPart||(plan.rows.indexOf(f)+1)+'/'+plan.rows.length}`)}
+      ${infoRow('Semester / Session',(f.sem||'—')+' · '+(D.settings.academicYear||getAcademicYear()))}
+      ${infoRow('Instalment',`${ordinal} of ${ofTotal}${f.instPart?' ('+f.instPart+')':''}`)}
       ${infoRow('Due Date',dueFmtd)}
 
       <div class="iv-divider"></div>
 
-      ${infoRow('Total Fee',fmtRs(plan.totalFee))}
-      ${infoRow('This Instalment Amount',fmtRs(f.amt))}
+      ${infoRow('Annual Fee',fmtRs(plan.totalFee))}
+      ${bigRow('Current Instalment',fmtRs(f.amt))}
       ${feeDiscountAmt(f)>0?infoRow('Discount on this instalment','− '+fmtRs(feeDiscountAmt(f))+(f.scholarshipLabel?' ('+f.scholarshipLabel+')':''))+infoRow('Before discount',fmtRs(feeGrossAmt(f))):''}
-      ${infoRow('Paid Amount',fmtRs(paid))}
-      ${infoRow('Remaining (this instalment)',fmtRs(remaining))}
-      ${infoRow('Instalments Paid',plan.paidCount+' of '+plan.rows.length)}
+      ${infoRow('Previously Paid',fmtRs(prevPaid))}
+      ${infoRow('Paid on This Instalment',fmtRs(paid))}
+      ${bigRow('Current Amount Due',fmtRs(remaining))}
+      ${infoRow('Instalments Paid',plan.paidCount+' of '+ofTotal)}
       ${infoRow('Instalments Remaining',plan.remainingCount)}
-      ${infoRow('Overall Remaining Fee',fmtRs(plan.totalRemaining))}
-      <div class="iv-row"><span class="iv-lb">Payment Status</span><span class="iv-vl iv-status iv-status-${status.replace('-','')}">${feeStatusLabel(status)}</span></div>
+      ${bigRow('Remaining Balance',fmtRs(plan.totalRemaining))}
+      <div class="iv-row"><span class="iv-lb">Payment Status</span><span class="iv-vl iv-status iv-st-${status.replace('-','')}">${feeStatusLabel(status)}</span></div>
       ${isPaid?infoRow('Payment Date',f.date&&f.date!=='-'?f.date:'—'):''}
+
+      <div class="iv-divider"></div>
+      ${schedule}
 
       <div class="iv-divider"></div>
       <div class="iv-bank">
         <div class="iv-bank-h">Bank / Payment Details</div>
         ${infoRow('Bank',D.settings.bankName)}
         ${infoRow('Branch',D.settings.bankBranch)}
-        ${infoRow('Account Title',D.settings.bankAccountTitle)}
+        ${infoRow('Account Title',D.settings.bankAccountTitle||D.settings.instName)}
         ${infoRow('Account No.',D.settings.bankAccountNo)}
         ${infoRow('IBAN',D.settings.bankIBAN)}
+        ${D.settings.bankJazzCash?infoRow('JazzCash',D.settings.bankJazzCash):''}
+        ${D.settings.bankEasyPaisa?infoRow('EasyPaisa',D.settings.bankEasyPaisa):''}
       </div>
 
       <div class="iv-instr">
@@ -5060,17 +5190,26 @@ function printInstalmentVouchers(roll, planKey, mode){
         <div class="iv-sig">Sign. Officer</div>
         <div class="iv-sig">Sign. Cashier</div>
       </div>
+      <div class="iv-seal">OFFICIAL<br>STAMP</div>
       <div class="iv-copy-lbl">Student Copy</div>
+      <div class="iv-foot">${D.settings.instName} · ${voucherNo} · Computer-generated document</div>
     </div>`;
   };
 
+  // Plan-level status for the summary bar. Late anywhere in the plan makes the
+  // whole plan late — same rule printReceipt and studentFeeStatus use, so the
+  // bar can never read PENDING while a row below it reads OVERDUE.
+  const planOverdue=plan.rows.some(r=>feeRemainingAmt(r)>0&&feeComputeStatus(r).indexOf('Overdue')>=0);
+  const planStatus=plan.fullyPaid?'Paid'
+                  :plan.totalPaid>0?(planOverdue?'Partial-Overdue':'Partial')
+                  :(planOverdue?'Overdue':'Pending');
   const summaryBar=`
     <div class="iv-summary">
-      <div><span>Total Fee</span><strong>${fmtRs(plan.totalFee)}</strong></div>
+      <div><span>Annual Fee</span><strong>${fmtRs(plan.totalFee)}</strong></div>
       <div><span>Total Paid</span><strong>${fmtRs(plan.totalPaid)}</strong></div>
-      <div><span>Remaining</span><strong>${fmtRs(plan.totalRemaining)}</strong></div>
+      <div><span>Remaining Balance</span><strong>${fmtRs(plan.totalRemaining)}</strong></div>
       <div><span>Instalments Paid</span><strong>${plan.paidCount} of ${plan.rows.length}</strong></div>
-      <div><span>Status</span><strong>${plan.fullyPaid?'FULLY PAID':plan.totalPaid>0?'PARTIALLY PAID':'UNPAID'}</strong></div>
+      <div><span>Status</span><strong>${feeStatusLabel(planStatus)}</strong></div>
     </div>`;
 
   const h=`<!DOCTYPE html><html><head><meta charset="UTF-8">
@@ -5104,24 +5243,46 @@ function printInstalmentVouchers(roll, planKey, mode){
     .iv-inst-name{font-size:13px;font-weight:800;font-family:Arial,sans-serif;}
     .iv-inst-sub{font-size:8.5px;color:#333;font-family:Arial,sans-serif;}
     .qr-slot{width:34px;height:34px;flex-shrink:0;}
-    .iv-title{text-align:center;font-size:16px;font-weight:800;margin:8px 0 6px;}
+    .iv-title{text-align:center;font-size:16px;font-weight:800;margin:8px 0 4px;}
+    /* "INSTALMENT 2 OF 4" — the single most important line on this slip, so it
+       gets its own reversed band instead of hiding in the info rows. */
+    .iv-instband{text-align:center;background:#000;color:#fff;font-family:Arial,sans-serif;font-size:11.5px;font-weight:800;letter-spacing:2px;padding:4px 6px;margin:0 0 7px;}
     .iv-row{display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid #000;font-family:Arial,sans-serif;}
     .iv-lb{color:#000;}
     .iv-vl{font-weight:700;text-align:right;}
-    .iv-status-Paid{color:#065f46;}
-    .iv-status-Partial,.iv-status-PartialOverdue{color:#92400e;}
-    .iv-status-Overdue{color:#b91c1c;}
-    .iv-status-Pending{color:#444;}
+    /* The three figures a student actually looks for: what this instalment costs,
+       what is due now, and what is left over the whole year. */
+    .iv-row-hi{background:#f0f0f0;padding:4px 4px;margin:0 -4px;border-bottom:1.5px solid #000;}
+    .iv-row-hi .iv-lb{font-weight:800;}
+    .iv-row-hi .iv-vl{font-size:11.5px;}
+    .iv-st-Paid{color:#065f46;}
+    .iv-st-Partial,.iv-st-PartialOverdue{color:#92400e;}
+    .iv-st-Overdue{color:#b91c1c;}
+    .iv-st-Pending{color:#444;}
     .iv-divider{border-top:2px solid #000;margin:6px 0;}
+    .iv-sched-h{font-weight:800;font-size:10px;margin:4px 0 4px;font-family:Arial,sans-serif;}
+    .iv-sched{width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:8.5px;}
+    .iv-sched th{background:#000;color:#fff;padding:3px 4px;text-align:left;font-size:8px;text-transform:uppercase;letter-spacing:.4px;}
+    .iv-sched td{padding:3px 4px;border-bottom:1px solid #999;}
+    .iv-sched tfoot td{border-top:1.5px solid #000;border-bottom:none;font-weight:800;}
+    .iv-sched .iv-num{text-align:right;}
+    .iv-sched th:nth-child(3),.iv-sched th:nth-child(4){text-align:right;}
+    .iv-sched-now td{background:#f0f0f0;font-weight:800;}
     .iv-bank-h,.iv-instr-h{font-weight:800;font-size:10px;margin:4px 0 3px;font-family:Arial,sans-serif;}
     .iv-instr ol{padding-left:16px;font-size:8.5px;line-height:1.5;font-family:Arial,sans-serif;}
     .iv-sig-row{display:flex;justify-content:space-between;margin-top:22px;font-family:Arial,sans-serif;font-size:9.5px;}
     .iv-sig{border-top:1px solid #000;padding-top:3px;width:40%;text-align:center;}
-    .iv-copy-lbl{text-align:center;font-weight:800;font-size:11px;margin-top:14px;font-family:Arial,sans-serif;}
+    .iv-seal{width:52px;height:52px;border:1.5px dashed #666;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:8px auto 0;font-family:Arial,sans-serif;font-size:6.5px;font-weight:700;color:#666;text-align:center;line-height:1.3;}
+    .iv-copy-lbl{text-align:center;font-weight:800;font-size:11px;margin-top:8px;font-family:Arial,sans-serif;}
+    .iv-foot{text-align:center;font-size:7.5px;color:#666;margin-top:5px;font-family:Arial,sans-serif;}
     @media print{
-      body{background:#fff!important;padding:0!important;}
-      .no-print-bar{display:none!important;}
-      .iv-card{page-break-inside:avoid;}
+      html,body{background:#fff!important;}
+      body{padding:0!important;margin:0!important;}
+      .no-print-bar,.prt-btn{display:none!important;}
+      /* Keep a whole slip together, but do NOT force one slip per page: the
+         landscape grid is meant to fit several side by side. */
+      .iv-card{page-break-inside:avoid;break-inside:avoid;}
+      .iv-summary{page-break-inside:avoid;break-inside:avoid;}
       @page{size:A4 landscape;margin:10mm;}
     }
   </style></head><body>
@@ -5153,6 +5314,155 @@ function printInstalmentVouchers(roll, planKey, mode){
 function fmtRs(n){ return 'Rs. '+(n||0).toLocaleString(); }
 
 /* ══════════════════════════════════════════════════
+   SHARED VOUCHER / RECEIPT BUILDING BLOCKS
+
+   Every printable money document — Fee Voucher, Instalment Voucher, Fee
+   Receipt, Transport Voucher, Transport Receipt — draws its branding, bank
+   panel, status badge, footer and print rules from THESE helpers rather than
+   keeping a private copy. Before this, the fee voucher had the bank name, the
+   mobile-wallet numbers and the office phone typed into its HTML while the
+   instalment voucher read them from D.settings, so the same student could get
+   two documents that disagreed about where to pay.
+══════════════════════════════════════════════════ */
+
+// One place that knows what "the institution" looks like on paper.
+function vchBrand(){
+  const s=D.settings||{};
+  return {
+    name:s.instName||'',
+    address:s.address||s.city||'',
+    city:s.city||'',
+    contact:s.contact||'',
+    phone:s.accountsPhone||s.contact||'',
+    officeHours:s.officeHours||'',
+    academicYear:s.academicYear||getAcademicYear(),
+    logoInner:getLogoBadgeInner()
+  };
+}
+
+// Bank / online payment panel. `accent` colours the heading, `softBg` the
+// panel — so each document keeps its own identity colour (fee = green,
+// transport = teal) while the CONTENT stays identical everywhere.
+function vchBankBlock(accent,softBg,opts){
+  const s=D.settings||{}, o=opts||{};
+  const line=(lb,val,strong)=>val?`${lb?lb+': ':''}${strong?'<strong>'+val+'</strong>':val}<br>`:'';
+  return `<div style="flex:0 0 ${o.width||'200px'};background:${softBg};border-radius:12px;padding:12px 14px">
+      <div style="font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${accent};margin-bottom:8px">Bank / Online Payment</div>
+      <div style="font-size:10.5px;color:#334155;line-height:1.9">
+        ${s.bankName?`<strong>${s.bankName}</strong>${s.bankBranch?' — '+s.bankBranch:''}<br>`:''}
+        ${line('A/C Title',s.bankAccountTitle||s.instName,true)}
+        ${line('A/C No',s.bankAccountNo,true)}
+        ${line('IBAN',s.bankIBAN,true)}
+        ${s.bankJazzCash?`<strong>JazzCash:</strong> ${s.bankJazzCash}<br>`:''}
+        ${s.bankEasyPaisa?`<strong>EasyPaisa:</strong> ${s.bankEasyPaisa}<br>`:''}
+        <span style="color:#94a3b8;font-size:9px">Mention Roll No. in description</span>
+      </div>
+    </div>`;
+}
+
+// Single status vocabulary for print. Keys are the internal statuses produced by
+// feeComputeStatus() / tfComputeStatus(); the visible words come from
+// feeStatusLabel() so the printed badge can never drift from the on-screen one.
+function vchStatusColors(status){
+  switch(status){
+    case 'Paid':            return {fg:'#065f46',bg:'#d1fae5',br:'#34d399'};
+    case 'Partial':         return {fg:'#92400e',bg:'#fef3c7',br:'#fbbf24'};
+    case 'Partial-Overdue': return {fg:'#9a3412',bg:'#ffedd5',br:'#fb923c'};
+    case 'Overdue':         return {fg:'#991b1b',bg:'#fee2e2',br:'#f87171'};
+    default:                return {fg:'#334155',bg:'#f1f5f9',br:'#cbd5e1'}; // Pending
+  }
+}
+function vchStatusBadge(status,opts){
+  const o=opts||{}, c=vchStatusColors(status);
+  const fs=o.size||11;
+  return `<span style="display:inline-block;padding:${o.pad||'4px 12px'};border-radius:${o.radius||'6px'};`
+       + `background:${o.solid?c.fg:c.bg};color:${o.solid?'#fff':c.fg};border:1.5px solid ${o.solid?c.fg:c.br};`
+       + `font-size:${fs}px;font-weight:800;letter-spacing:1px;text-transform:uppercase;font-family:Arial,sans-serif;white-space:nowrap">`
+       + `${feeStatusLabel(status)}</span>`;
+}
+
+// Shared footer line. `docNo` is whatever number identifies this document
+// (voucher no / receipt no) so every template ends the same way.
+function vchFooter(docNo,extra){
+  const when=new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+  return `<div style="margin-top:12px;text-align:center">
+      <div style="font-size:9px;color:#94a3b8">Generated ${when}${docNo?' · '+docNo:''}${extra?' · '+extra:''} · Computer-generated document</div>
+    </div>`;
+}
+
+// Signature + official-seal row, previously only on the fee voucher.
+function vchSignatureRow(leftLabel,midLabel){
+  return `<div style="display:flex;gap:0;background:#f8fafc;border-radius:12px;overflow:hidden">
+      <div style="flex:1;padding:12px 14px;text-align:center">
+        <div style="height:26px;border-bottom:1.5px solid #cbd5e1;margin-bottom:6px"></div>
+        <div style="font-size:8px;font-weight:700;color:#94a3b8;letter-spacing:.5px;text-transform:uppercase">${leftLabel||'Student / Parent Signature'}</div>
+      </div>
+      <div style="flex:1;padding:12px 14px;text-align:center;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0">
+        <div style="height:26px;border-bottom:1.5px dashed #cbd5e1;margin-bottom:6px"></div>
+        <div style="font-size:8px;font-weight:700;color:#94a3b8;letter-spacing:.5px;text-transform:uppercase">${midLabel||'Accounts Officer / Cashier'}</div>
+      </div>
+      <div style="flex:1;padding:12px 14px;text-align:center">
+        <div style="height:26px;display:flex;align-items:center;justify-content:center;margin-bottom:6px">
+          <div style="width:54px;height:54px;border:1.5px dashed #cbd5e1;border-radius:50%;display:flex;align-items:center;justify-content:center">
+            <div style="font-size:7px;color:#cbd5e1;font-weight:700;text-align:center;line-height:1.3">OFFICIAL<br>STAMP</div>
+          </div>
+        </div>
+        <div style="font-size:8px;font-weight:700;color:#94a3b8;letter-spacing:.5px;text-transform:uppercase;margin-top:2px">College Seal</div>
+      </div>
+    </div>`;
+}
+
+// Shared @media print rules. `pageSize` lets the landscape instalment sheet keep
+// its own page setup. `.vch-copy` is what carries the page break for multi-copy
+// documents — an empty <div class="page-break"> between siblings is unreliable
+// in Chrome's PDF engine, a break-after on the copy itself is not.
+function vchPrintCss(pageSize){
+  return `@media print{
+      html,body{background:#fff!important;}
+      body{padding:0!important;margin:0!important;}
+      .no-print,.no-print-bar,.npb-txt,.prt-btn,.btn-row{display:none!important;}
+      .vch-copy{page-break-inside:avoid;break-inside:avoid;}
+      .vch-copy:not(:last-of-type){page-break-after:always;break-after:page;}
+      .page-break{page-break-after:always;break-after:page;}
+      /* Each copy already gets its own page, so there is nothing to cut along —
+         the scissors line is on-screen decoration only. */
+      .cut-line{display:none!important;}
+      .avoid-break{page-break-inside:avoid;break-inside:avoid;}
+      @page{size:${pageSize||'A4'};margin:${pageSize&&pageSize.indexOf('landscape')>-1?'10mm':'12mm'};}
+    }`;
+}
+
+/* ── TRANSPORT money primitives ──────────────────────────────────────────────
+   Mirrors of feePaidAmt / feeRemainingAmt / feeComputeStatus so transport shares
+   ONE status vocabulary with fees. Transport records are all-or-nothing today
+   (no partial collection flow), so paid is derived from t.status — but an
+   explicit t.paidAmt is honoured when present, which is what collectTransportFee
+   now writes and what a future partial-payment flow would use. The stored
+   t.status is never changed by these; they are read-only derivations.
+──────────────────────────────────────────────────────────────────────────────*/
+function tfPaidAmt(t){
+  if(!t) return 0;
+  if(t.paidAmt!=null) return Math.max(0,Number(t.paidAmt)||0);
+  return t.status==='Paid' ? (Number(t.amt)||0) : 0;
+}
+function tfRemainingAmt(t){
+  return Math.max(0,(Number(t&&t.amt)||0)-tfPaidAmt(t));
+}
+function tfComputeStatus(t){
+  if(!t) return 'Pending';
+  const amt=Number(t.amt)||0, paid=tfPaidAmt(t);
+  if(amt>0&&paid>=amt) return 'Paid';
+  const today=new Date(); today.setHours(0,0,0,0);
+  let due=null;
+  try{ due=t.dueDate?parseDate(t.dueDate):null; }catch(e){ due=null; }
+  if(due) due.setHours(0,0,0,0);
+  const overdue=!!(due&&due<today);
+  if(paid>0) return overdue?'Partial-Overdue':'Partial';
+  return overdue?'Overdue':'Pending';
+}
+
+
+/* ══════════════════════════════════════════════════
    FEE PAYMENT RECEIPT — full A4, branded to match the Fee Voucher (same
    header style, colours, logo) instead of a small 420px thermal-slip look.
    Always shows: Amount Received (this payment) + Outstanding/Remaining
@@ -5176,21 +5486,42 @@ function printReceipt(idx, paymentAmount){
 
   const todayFmt = new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
   const academicYear = getAcademicYear();
-  const qrPayload = `RCPT:${f.receipt||''}|ROLL:${f.roll}|AMT:${receivedNow}|DATE:${f.date||''}`;
+  // Existing keys (RCPT/ROLL/AMT/DATE) keep their meaning so any scanner already
+  // in use still reads this; PAID/REM are appended for parity with the voucher QR.
+  const qrPayload = `RCPT:${f.receipt||''}|ROLL:${f.roll}|AMT:${receivedNow}|DATE:${f.date||''}|PAID:${feePaidAmt(f)}|REM:${feeRemainingAmt(f)}`;
 
   // ── Instalment math: total fee, paid-to-date, and what's still owed ──
   const isInstalment = !!(f.isInstalment && f.instTotal);
+  // Status of the individual fee row this receipt was issued against, and of the
+  // whole document (the plan, for an instalment). Both are DERIVED from money
+  // received — the receipt can never print a status that disagrees with the
+  // figures printed right next to it.
+  const thisStatus = feeComputeStatus(f);
+  let docStatus = thisStatus;
   let feeLabel='Tuition Fee — Full Payment', totalFeeForDoc=f.amt, paidToDate=receivedNow,
-      outstanding=0, instRows='', instCount='', instPaidCount=0;
+      outstanding=0, instRows='', instCount='', instPaidCount=0, instOrdinal=0, nextDueLine='';
   if(isInstalment){
     const plan=instPlanSummary(f);
     const allInst=plan.rows;
     instPaidCount=plan.paidCount;
     instCount=allInst.length;
+    instOrdinal=Math.max(0,allInst.indexOf(f))+1;
     paidToDate=plan.totalPaid;
     totalFeeForDoc=plan.totalFee;
     outstanding=plan.totalRemaining;
-    feeLabel=`Tuition Fee — Instalment ${f.instPart||''}`.trim();
+    // Late anywhere in the plan makes the whole plan late — same rule the
+    // Students list uses (studentFeeStatus).
+    const planOverdue=allInst.some(r=>feeRemainingAmt(r)>0&&feeComputeStatus(r).indexOf('Overdue')>=0);
+    docStatus = plan.totalRemaining<=0 ? 'Paid'
+              : plan.totalPaid>0 ? (planOverdue?'Partial-Overdue':'Partial')
+              : (planOverdue?'Overdue':'Pending');
+    feeLabel=`Tuition Fee — Instalment ${instOrdinal} of ${instCount}`;
+    // The next date the student actually has to act on — the earliest unpaid
+    // instalment in the plan, not necessarily the one this receipt covers.
+    const nextUnpaid=allInst.find(r=>feeRemainingAmt(r)>0);
+    if(nextUnpaid&&nextUnpaid.dueDate){
+      nextDueLine=`Next due: <strong>${nextUnpaid.dueDate}</strong> — instalment ${allInst.indexOf(nextUnpaid)+1} of ${instCount} (Rs ${feeRemainingAmt(nextUnpaid).toLocaleString()}).<br>`;
+    }
     instRows = allInst.map((inst,i)=>{
       const st=feeComputeStatus(inst);
       const isPaidRow=st==='Paid', isThis=inst===f;
@@ -5203,10 +5534,13 @@ function printReceipt(idx, paymentAmount){
     }).join('');
   }else{
     outstanding = Math.max(0, (f.amt||0) - feePaidAmt(f));
+    docStatus = thisStatus;
     const head=(f.category&&f.category!=='Tuition')?f.category:'Tuition Fee';
     feeLabel = outstanding>0
       ? head+' — Part Payment'
       : (feePaidAmt(f)>receivedNow ? head+' — Final Payment (balance cleared)' : head+' — Full Payment');
+    paidToDate = feePaidAmt(f);
+    if(outstanding>0&&f.dueDate) nextDueLine=`Due by: <strong>${f.dueDate}</strong>.<br>`;
   }
 
   // ── Relief granted on the record this receipt belongs to ─────────────────
@@ -5236,11 +5570,11 @@ function printReceipt(idx, paymentAmount){
     .npb-txt p{font-size:10.5px;color:#bbb;margin-top:2px;}
     .prt-btn{padding:9px 20px;border:none;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:#111;}
     .sheet{max-width:800px;margin:0 auto;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,.10);border:1px solid #eef0f2;}
+    /* Shared print rules — same @page, same hidden toolbar, same
+       don't-split-a-card behaviour as every other voucher/receipt. */
+    ${vchPrintCss('A4')}
     @media print{
-      body{background:#fff!important;padding:0!important;}
-      .no-print-bar{display:none!important;}
       .sheet{box-shadow:none!important;border-radius:0!important;border:none!important;max-width:none!important;}
-      @page{size:A4;margin:12mm;}
     }
   </style></head><body>
   <div class="no-print-bar">
@@ -5258,8 +5592,9 @@ function printReceipt(idx, paymentAmount){
         <div style="flex:1;padding:16px 14px 14px 4px;display:flex;flex-direction:column;justify-content:center">
           <div style="font-size:19px;font-weight:800;color:#fff;letter-spacing:-.2px;line-height:1.15">${D.settings.instName||''}</div>
           <div style="font-size:10.5px;color:rgba(255,255,255,.65);margin-top:3px;font-weight:500">${D.settings.city||''} · Accounts Department · AY ${academicYear}</div>
-          <div style="margin-top:9px;display:inline-flex">
+          <div style="margin-top:9px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
             <span style="background:rgba(255,255,255,.16);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:4px 12px;border-radius:20px">OFFICIAL FEE RECEIPT</span>
+            ${vchStatusBadge(docStatus,{size:9.5,pad:'3px 10px',radius:'20px'})}
           </div>
         </div>
         <div style="width:120px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px 10px">
@@ -5288,7 +5623,7 @@ function printReceipt(idx, paymentAmount){
             <table style="width:100%;border-collapse:collapse">
               ${infoRow('Date Received',(f.date&&f.date!=='-')?f.date:todayFmt)}
               ${infoRow('Payment Method',(f.method&&f.method!=='-')?f.method:'—')}
-              ${infoRow(isInstalment?'Instalment':'Semester / Year',isInstalment?(f.instPart||'—')+' of '+instCount:(f.sem||'—'))}
+              ${infoRow(isInstalment?'Instalment':'Semester / Year',isInstalment?instOrdinal+' of '+instCount:(f.sem||'—'))}
               ${infoRow('Fee Head',f.category&&f.category!=='Tuition'?f.category:'Tuition Fee')}
             </table>
           </td>
@@ -5315,22 +5650,32 @@ function printReceipt(idx, paymentAmount){
         </tbody>
       </table>`:''}
 
-      <!-- AMOUNT RECEIVED / OUTSTANDING CALLOUT -->
-      <div style="display:flex;gap:12px;margin-bottom:16px">
+      <!-- AMOUNT RECEIVED / PAID TO DATE / REMAINING CALLOUT
+           All three figures are always printed, including "Rs 0" once the fee is
+           settled: a suppressed remaining row reads as "unknown", not as "clear",
+           and a parent holding the slip has no way to tell the difference. -->
+      <div style="display:flex;gap:10px;margin-bottom:16px" class="avoid-break">
         <div style="flex:1;background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:12px;padding:14px 16px">
           <div style="font-size:9.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#065f46">Amount Received (This Payment)</div>
-          <div style="font-size:24px;font-weight:800;color:#065f46;margin-top:4px">Rs ${receivedNow.toLocaleString()}</div>
+          <div style="font-size:23px;font-weight:800;color:#065f46;margin-top:4px">Rs ${receivedNow.toLocaleString()}</div>
           <div style="font-size:9.5px;color:#166534;margin-top:3px;font-style:italic">${amountInWords(receivedNow)}</div>
         </div>
-        <div style="flex:1;background:${fullyPaid?'#f0fdf4':'#fef2f2'};border:1.5px solid ${fullyPaid?'#bbf7d0':'#fecaca'};border-radius:12px;padding:14px 16px">
-          <div style="font-size:9.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${fullyPaid?'#065f46':'#b91c1c'}">${fullyPaid?'Status':'Outstanding Balance'}</div>
-          <div style="font-size:24px;font-weight:800;color:${fullyPaid?'#065f46':'#b91c1c'};margin-top:4px">${fullyPaid?'FULLY PAID':'Rs '+outstanding.toLocaleString()}</div>
-          <div style="font-size:9.5px;color:${fullyPaid?'#166534':'#991b1b'};margin-top:3px">${isInstalment?`${instPaidCount} of ${instCount} instalments paid · Total Fee Rs ${totalFeeForDoc.toLocaleString()}`:fullyPaid?'No balance remaining':'Balance still due on this fee'}</div>
+        <div style="flex:0 0 27%;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:12px;padding:14px 16px">
+          <div style="font-size:9.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#475569">Total Paid Amount</div>
+          <div style="font-size:23px;font-weight:800;color:#0f172a;margin-top:4px">Rs ${paidToDate.toLocaleString()}</div>
+          <div style="font-size:9.5px;color:#64748b;margin-top:3px">of Rs ${totalFeeForDoc.toLocaleString()} ${isInstalment?'annual fee':'payable'}</div>
+        </div>
+        <div style="flex:0 0 27%;background:${fullyPaid?'#f0fdf4':'#fef2f2'};border:1.5px solid ${fullyPaid?'#bbf7d0':'#fecaca'};border-radius:12px;padding:14px 16px">
+          <div style="font-size:9.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${fullyPaid?'#065f46':'#b91c1c'}">Remaining Amount</div>
+          <div style="font-size:23px;font-weight:800;color:${fullyPaid?'#065f46':'#b91c1c'};margin-top:4px">Rs ${outstanding.toLocaleString()}</div>
+          <div style="margin-top:5px">${vchStatusBadge(docStatus,{size:9,pad:'2px 8px'})}</div>
         </div>
       </div>
+      ${isInstalment?`<div style="font-size:10px;color:#64748b;margin:-8px 0 16px">${instPaidCount} of ${instCount} instalments paid · this receipt covers instalment ${instOrdinal} of ${instCount} (${feeStatusLabel(thisStatus)})</div>`:''}
 
       ${isInstalment?`
       <!-- INSTALMENT SCHEDULE -->
+      <div class="avoid-break">
       <div style="font-size:10px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:#475569;margin-bottom:6px">Instalment Schedule</div>
       <table style="width:100%;border-collapse:collapse;margin-bottom:16px;font-size:10.5px">
         <thead><tr style="background:#f8fafc">
@@ -5340,18 +5685,37 @@ function printReceipt(idx, paymentAmount){
           <th style="padding:6px 8px;border:1px solid #e2e8f0;font-size:9px;text-transform:uppercase;color:#64748b">Status</th>
         </tr></thead>
         <tbody>${instRows}</tbody>
-      </table>`:''}
+        <tfoot><tr style="background:#f8fafc">
+          <td colspan="2" style="padding:6px 8px;border:1px solid #e2e8f0;font-weight:800">Total · Paid Rs ${paidToDate.toLocaleString()}</td>
+          <td style="padding:6px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:800">Rs ${totalFeeForDoc.toLocaleString()}</td>
+          <td style="padding:6px 8px;border:1px solid #e2e8f0;text-align:center;font-weight:800;color:${outstanding>0?'#b91c1c':'#065f46'}">Rs ${outstanding.toLocaleString()} due</td>
+        </tr></tfoot>
+      </table></div>`:''}
 
-      <!-- SIGNATURES -->
-      <div style="display:flex;justify-content:space-between;margin-top:34px">
-        <div style="width:38%;text-align:center;border-top:1px solid #cbd5e1;padding-top:6px;font-size:10.5px;color:#475569">Sign. Cashier</div>
-        <div style="width:38%;text-align:center;border-top:1px solid #cbd5e1;padding-top:6px;font-size:10.5px;color:#475569">Sign. Accounts Officer</div>
-      </div>
+      <!-- HOW TO PAY THE BALANCE — only when something is still owed. A settled
+           receipt has no balance to pay, so printing deposit instructions on it
+           would just invite a second payment. Same panel as the vouchers. -->
+      ${outstanding>0?`
+      <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap" class="avoid-break">
+        <div style="flex:1;min-width:220px;background:#f8fafc;border-radius:12px;padding:12px 14px">
+          <div style="font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${brand};margin-bottom:8px">Paying the Balance</div>
+          <div style="font-size:10.5px;color:#475569;line-height:1.9">
+            <strong>Rs ${outstanding.toLocaleString()}</strong> is still outstanding${isInstalment?' across the plan':''}.<br>
+            ${nextDueLine}
+            Deposit at the <strong>College Accounts Office</strong> or via the channels alongside.<br>
+            Queries: <strong>${D.settings.accountsPhone||D.settings.contact||'—'}</strong>${D.settings.officeHours?' · Office hours '+D.settings.officeHours:''}
+          </div>
+        </div>
+        ${vchBankBlock(brand,'#f0fdf4')}
+      </div>`:''}
 
-      <div style="margin-top:20px;font-size:8.5px;color:#94a3b8;line-height:1.6;border-top:1px solid #eef0f2;padding-top:10px">
+      <!-- SIGNATURES + SEAL — same block as the fee/transport vouchers -->
+      <div style="margin-top:26px" class="avoid-break">${vchSignatureRow('Sign. Cashier','Sign. Accounts Officer')}</div>
+
+      <div style="margin-top:16px;font-size:8.5px;color:#94a3b8;line-height:1.6;border-top:1px solid #eef0f2;padding-top:10px">
         This is a computer-generated receipt issued against the amount received above. Please retain it as proof of payment. Fee once paid is non-refundable and non-transferable. Scan the QR code above to verify this receipt online.
-        <br>Generated ${todayFmt} · Printed from ${D.settings.instName} — Online Fee Management System
       </div>
+      ${vchFooter(f.receipt||'',D.settings.instName||'')}
     </div>
   </div>
   <script>
@@ -5485,7 +5849,8 @@ function printVoucher(idx){
   // What the student must actually hand over: the unpaid balance (NOT the full
   // billed amount — a part-payment may already be on record) plus the extras.
   const grandTotal = stillOwed + extraChargesTotal;
-  const qrPayload = `VCH:${voucherNo}|ROLL:${stu.roll}|AMT:${grandTotal}|DUE:${f.dueDate||''}`;
+  // Same key names/order as printInstalmentVouchers' payload so one scanner reads both.
+  const qrPayload = `VCH:${voucherNo}|ROLL:${stu.roll}|AMT:${grandTotal}|PAID:${alreadyPaid}|REM:${stillOwed}|DUE:${f.dueDate||''}`;
 
   // Late fee already baked into f.amt (via Apply Late Fee) — split it back out
   // so it still shows as its own line item on the voucher instead of being
@@ -5561,7 +5926,7 @@ function printVoucher(idx){
           </tbody>
         </table>` : '';
 
-  let allInst=[], paidCount=0, totalCount=0, paidAmt=0, remainAmt=0, planTotal=0;
+  let allInst=[], paidCount=0, totalCount=0, paidAmt=0, remainAmt=0, planTotal=0, instOrdinal=0;
   if(isInstalment){
     const plan   = instPlanSummary(f);
     allInst    = plan.rows;
@@ -5570,7 +5935,15 @@ function printVoucher(idx){
     paidAmt    = plan.totalPaid;
     planTotal  = plan.totalFee;
     remainAmt  = plan.totalRemaining;
+    // Position of THIS challan inside the plan — derived from the sorted rows,
+    // never from f.instPart (which is a free-text label like "1/4" and can be
+    // blank on older records).
+    instOrdinal = Math.max(0, allInst.indexOf(f)) + 1;
   }
+  // A full-fee challan and an instalment challan must be tellable apart at a
+  // glance, not by reading one small word: they get a different title, a
+  // different accent colour and a different sub-line.
+  const docKind = isInstalment ? `INSTALMENT VOUCHER — ${instOrdinal} OF ${totalCount}` : 'FULL FEE VOUCHER';
 
   /* ── Instalment schedule rows ── */
   let scheduleRows = '';
@@ -5594,7 +5967,7 @@ function printVoucher(idx){
               background:${isPaid?'#d1fae5':iOvr?'#fee2e2':'#fef3c7'};
               color:${isPaid?'#065f46':iOvr?'#991b1b':'#92400e'};
               border:1px solid ${isPaid?'#a7f3d0':iOvr?'#fca5a5':'#fde68a'}">
-              ${isPaid?'PAID':iPart?(iOvr?'PART · OVERDUE':'PART PAID'):iOvr?'OVERDUE':'PENDING'}
+              ${feeStatusLabel(instSt)}
             </span>
             ${thisPart?'<span style="font-size:9px;font-weight:800;color:#1d4ed8;margin-left:4px">▶ THIS</span>':''}
           </td>
@@ -5607,12 +5980,14 @@ function printVoucher(idx){
     // copyType: 'student' | 'office' | 'bank'
     const FONT = `-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Arial,sans-serif`;
     const ink       = '#0f172a';
-    const brand      = '#0d7a4f';       // modern emerald — brand accent
-    const brandDeep  = '#0a3d2a';       // deep header background
+    // Emerald for a full-fee challan, indigo for an instalment challan — so the
+    // two documents are distinguishable across the room, not just by the words.
+    const brand      = isInstalment ? '#4338ca' : '#0d7a4f';
+    const brandDeep  = isInstalment ? '#1e1b64' : '#0a3d2a';
     const gold       = '#d4a72c';
-    const stripeClr  = copyType==='student' ? '#0d7a4f' : copyType==='office' ? '#2563eb' : '#7c3aed';
-    const stripeSoft = copyType==='student' ? '#ecfdf5' : copyType==='office' ? '#eff6ff' : '#f5f3ff';
-    const stampLabel = copyType==='student' ? 'STUDENT COPY' : copyType==='office' ? 'COLLEGE COPY' : 'BANK COPY';
+    const stripeClr  = copyType==='student' ? brand : copyType==='office' ? '#2563eb' : '#7c3aed';
+    const stripeSoft = copyType==='student' ? (isInstalment?'#eef2ff':'#ecfdf5') : copyType==='office' ? '#eff6ff' : '#f5f3ff';
+    const stampLabel = copyLabel || (copyType==='student' ? 'STUDENT COPY' : copyType==='office' ? 'COLLEGE COPY' : 'BANK COPY');
 
     const statusBand = isOverdue
       ? `<div style="background:#dc2626;color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:700;letter-spacing:.5px">⚠ OVERDUE — ${Math.abs(diffDays)} day(s) past due — pay immediately</div>`
@@ -5621,7 +5996,7 @@ function printVoucher(idx){
         : `<div style="background:${brand};color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:600;letter-spacing:.3px">✓ Payment due on or before ${dueFmt}</div>`;
 
     return `
-<div style="background:#fff;font-family:${FONT};margin-bottom:0;page-break-inside:avoid;border-radius:18px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,.10),0 1px 3px rgba(15,23,42,.08);border:1px solid #eef0f2">
+<div class="vch-copy" style="background:#fff;font-family:${FONT};margin-bottom:0;page-break-inside:avoid;border-radius:18px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,.10),0 1px 3px rgba(15,23,42,.08);border:1px solid #eef0f2">
 
   <!-- HEADER -->
   <div style="background:linear-gradient(135deg,${brandDeep},${brand});padding:0;position:relative">
@@ -5635,8 +6010,9 @@ function printVoucher(idx){
       <div style="flex:1;padding:16px 14px 14px 4px;display:flex;flex-direction:column;justify-content:center">
         <div style="font-size:19px;font-weight:800;color:#fff;letter-spacing:-.2px;line-height:1.15">${D.settings.instName||''}</div>
         <div style="font-size:10.5px;color:rgba(255,255,255,.65);margin-top:3px;font-weight:500">${D.settings.city||''} · Accounts Department · AY ${academicYear}</div>
-        <div style="margin-top:9px;display:inline-flex">
-          <span style="background:rgba(255,255,255,.16);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:4px 12px;border-radius:20px">FEE ${isInstalment?'INSTALMENT ':''}VOUCHER</span>
+        <div style="margin-top:9px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span style="background:rgba(255,255,255,.16);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:4px 12px;border-radius:20px">${docKind}</span>
+          ${vchStatusBadge(feeSt,{size:9.5,pad:'3px 10px',radius:'20px'})}
         </div>
       </div>
 
@@ -5704,15 +6080,19 @@ function printVoucher(idx){
     </div>
 
     ${isInstalment ? `
-    <!-- INSTALMENT SUMMARY BOXES -->
+    <!-- INSTALMENT SUMMARY BOXES — every figure derived from the plan rows -->
     <div style="display:flex;gap:8px;margin-bottom:12px">
       <div style="flex:1;background:#ecfdf5;border-radius:10px;padding:10px;text-align:center">
         <div style="font-size:16px;font-weight:800;color:#047857;line-height:1">${paidCount} / ${totalCount}</div>
         <div style="font-size:8px;font-weight:600;color:#64748b;margin-top:3px;letter-spacing:.3px;text-transform:uppercase">Instalments Paid</div>
       </div>
-      <div style="flex:1;background:#fffbeb;border-radius:10px;padding:10px;text-align:center">
-        <div style="font-size:13px;font-weight:800;color:#b45309;line-height:1">${f.instPart||'—'}</div>
+      <div style="flex:1;background:#eef2ff;border-radius:10px;padding:10px;text-align:center">
+        <div style="font-size:13px;font-weight:800;color:#4338ca;line-height:1">${instOrdinal} of ${totalCount}</div>
         <div style="font-size:8px;font-weight:600;color:#64748b;margin-top:3px;letter-spacing:.3px;text-transform:uppercase">This Challan</div>
+      </div>
+      <div style="flex:1;background:#f0fdf4;border-radius:10px;padding:10px;text-align:center">
+        <div style="font-size:13px;font-weight:800;color:#047857;line-height:1">Rs ${paidAmt.toLocaleString()}</div>
+        <div style="font-size:8px;font-weight:600;color:#64748b;margin-top:3px;letter-spacing:.3px;text-transform:uppercase">Total Paid</div>
       </div>
       <div style="flex:1;background:#fef2f2;border-radius:10px;padding:10px;text-align:center">
         <div style="font-size:13px;font-weight:800;color:#b91c1c;line-height:1">Rs ${remainAmt.toLocaleString()}</div>
@@ -5788,9 +6168,25 @@ function printVoucher(idx){
         </div>
         <div style="text-align:center">
           <div style="background:rgba(255,255,255,.14);border-radius:8px;padding:7px 14px;margin-bottom:5px">
-            <div style="font-size:11px;font-weight:800;letter-spacing:2px;color:#fff">${alreadyPaid>0?(isOverdue?'PART · OVERDUE':'PART PAID'):isOverdue?'OVERDUE':'UNPAID'}</div>
+            <div style="font-size:11px;font-weight:800;letter-spacing:2px;color:#fff">${feeStatusLabel(feeSt)}</div>
           </div>
           <div style="font-size:8px;color:rgba(255,255,255,.5);font-weight:600;text-transform:uppercase;letter-spacing:.5px">Office Stamp</div>
+        </div>
+      </div>
+      <!-- Paid / Remaining strip: the two figures a parent looks for, on every
+           copy, always printed — Rs 0 included once the challan is settled. -->
+      <div style="display:flex;gap:1px;background:rgba(255,255,255,.15)">
+        <div style="flex:1;padding:7px 16px">
+          <div style="font-size:8px;color:rgba(255,255,255,.6);font-weight:700;letter-spacing:.8px;text-transform:uppercase">Paid Amount</div>
+          <div style="font-size:13px;font-weight:800;color:#bbf7d0;margin-top:1px">Rs ${(isInstalment?paidAmt:alreadyPaid).toLocaleString()}</div>
+        </div>
+        <div style="flex:1;padding:7px 16px">
+          <div style="font-size:8px;color:rgba(255,255,255,.6);font-weight:700;letter-spacing:.8px;text-transform:uppercase">Remaining Amount</div>
+          <div style="font-size:13px;font-weight:800;color:${(isInstalment?remainAmt:stillOwed)>0?'#fecaca':'#bbf7d0'};margin-top:1px">Rs ${(isInstalment?remainAmt:stillOwed).toLocaleString()}</div>
+        </div>
+        <div style="flex:1;padding:7px 16px">
+          <div style="font-size:8px;color:rgba(255,255,255,.6);font-weight:700;letter-spacing:.8px;text-transform:uppercase">${isInstalment?'Annual Fee':'Total Payable'}</div>
+          <div style="font-size:13px;font-weight:800;color:#fff;margin-top:1px">Rs ${(isInstalment?planTotal:(Number(f.amt)||0)).toLocaleString()}</div>
         </div>
       </div>
     </div>
@@ -5803,46 +6199,17 @@ function printVoucher(idx){
           Pay <strong>on or before</strong> the due date. <span style="color:#dc2626;font-weight:700">Late fee: ${D.settings.lateFeePct||0}% of the amount, applied after due date.</span><br>
           Present at the <strong>College Accounts Office</strong> or designated <strong>Bank Branch</strong>.<br>
           Cashier will stamp and sign — <strong>retain your copy as proof.</strong><br>
-          Queries: <strong>042-35761234</strong> · Office hours 9am–3pm (Mon–Sat)
+          Queries: <strong>${D.settings.accountsPhone||D.settings.contact||'—'}</strong>${D.settings.officeHours?' · Office hours '+D.settings.officeHours:''}
         </div>
       </div>
-      <div style="flex:0 0 200px;background:${stripeSoft};border-radius:12px;padding:12px 14px">
-        <div style="font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${stripeClr};margin-bottom:8px">Bank / Online Payment</div>
-        <div style="font-size:10.5px;color:#334155;line-height:1.9">
-          <strong>MCB Bank Ltd</strong> — Johar Town<br>
-          A/C Title: <strong>${D.settings.instName}</strong><br>
-          A/C No: <strong>0123456789</strong><br>
-          <strong>JazzCash:</strong> 0300-8001234<br>
-          <strong>EasyPaisa:</strong> 0321-7001234<br>
-          <span style="color:#94a3b8;font-size:9px">Mention Roll No. in description</span>
-        </div>
-      </div>
+      ${vchBankBlock(stripeClr,stripeSoft)}
     </div>
 
     <!-- SIGNATURES ROW -->
-    <div style="display:flex;gap:0;background:#f8fafc;border-radius:12px;overflow:hidden">
-      <div style="flex:1;padding:12px 14px;text-align:center">
-        <div style="height:26px;border-bottom:1.5px solid #cbd5e1;margin-bottom:6px"></div>
-        <div style="font-size:8px;font-weight:700;color:#94a3b8;letter-spacing:.5px;text-transform:uppercase">Student / Parent Signature</div>
-      </div>
-      <div style="flex:1;padding:12px 14px;text-align:center;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0">
-        <div style="height:26px;border-bottom:1.5px dashed #cbd5e1;margin-bottom:6px"></div>
-        <div style="font-size:8px;font-weight:700;color:#94a3b8;letter-spacing:.5px;text-transform:uppercase">Accounts Officer / Cashier</div>
-      </div>
-      <div style="flex:1;padding:12px 14px;text-align:center">
-        <div style="height:26px;display:flex;align-items:center;justify-content:center;margin-bottom:6px">
-          <div style="width:54px;height:54px;border:1.5px dashed #cbd5e1;border-radius:50%;display:flex;align-items:center;justify-content:center">
-            <div style="font-size:7px;color:#cbd5e1;font-weight:700;text-align:center;line-height:1.3">OFFICIAL<br>STAMP</div>
-          </div>
-        </div>
-        <div style="font-size:8px;font-weight:700;color:#94a3b8;letter-spacing:.5px;text-transform:uppercase;margin-top:2px">College Seal</div>
-      </div>
-    </div>
+    ${vchSignatureRow('Student / Parent Signature','Accounts Officer / Cashier')}
 
     <!-- FOOTER -->
-    <div style="margin-top:12px;text-align:center">
-      <div style="font-size:9px;color:#94a3b8">Generated ${todayFmt} · Voucher ${voucherNo} · Valid 30 days · Computer-generated, no signature required for issuance</div>
-    </div>
+    ${vchFooter('Voucher '+voucherNo,'Valid 30 days')}
 
   </div><!-- /body -->
 </div><!-- /card -->`;
@@ -5862,29 +6229,33 @@ function printVoucher(idx){
     .cut-line{display:flex;align-items:center;gap:10px;margin:16px 0;color:#9ca3af;font-size:10.5px;font-family:Arial,sans-serif}
     .cut-line::before,.cut-line::after{content:'';flex:1;border-top:1.5px dashed #cbd5e1}
     .cut-scissors{font-size:13px}
+    /* Page breaks ride on .vch-copy itself (see vchPrintCss) — an empty
+       <div class="page-break"> between siblings is ignored by Chrome's PDF
+       engine often enough that copies 2 and 3 landed on page 1. */
+    ${vchPrintCss('A4')}
     @media print{
-      body{background:#fff;padding:0;}
-      .no-print{display:none!important;}
-      .page-break{page-break-after:always;}
-      .cut-line{page-break-after:avoid;margin:8px 0;}
+      .vch-copy{box-shadow:none!important;border-radius:0!important;border:none!important;}
     }`;
 
+  // Real labels — these reach genCopy's `copyLabel` and print on the copy badge.
+  // The parameter existed before but every call passed `c.label` on an object
+  // that had no `label`, so the badge silently fell back to the copyType map.
   const copies = [
-    {type:'student'},
-    {type:'office'},
-    {type:'bank'},
+    {type:'student', label:'STUDENT COPY'},
+    {type:'office',  label:'COLLEGE COPY'},
+    {type:'bank',    label:'BANK COPY'},
   ];
 
   const allCopies = copies.map((c,i) =>
     genCopy(c.label, c.type) + (i < copies.length-1 ?
-      `<div class="cut-line"><span class="cut-scissors">✂</span> <span style="letter-spacing:1px;text-transform:uppercase;font-size:9.5px">cut here — ${c.type==='student'?'College Copy Below':'Bank Copy Below'}</span> <span class="cut-scissors">✂</span></div><div class="page-break"></div>` : '')
+      `<div class="cut-line"><span class="cut-scissors">✂</span> <span style="letter-spacing:1px;text-transform:uppercase;font-size:9.5px">cut here — ${copies[i+1].label} below</span> <span class="cut-scissors">✂</span></div>` : '')
   ).join('');
 
   const h = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fee Challan — ${stu.name} — ${voucherNo}</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><style>${css}</style></head><body>
   <div class="no-print">
     <div class="no-print-left">
-      <h3>📄 Fee Demand Challan — ${stu.name}</h3>
-      <p>${voucherNo} &nbsp;·&nbsp; ${isInstalment?'Instalment '+f.instPart:'Full Payment'} &nbsp;·&nbsp; Due: ${dueFmt} &nbsp;·&nbsp; Amount: <strong>Rs ${f.amt.toLocaleString()}</strong> &nbsp;·&nbsp; 3 Copies (Student · College · Bank)</p>
+      <h3>📄 ${isInstalment?'Instalment Fee Challan':'Full Fee Challan'} — ${stu.name}</h3>
+      <p>${voucherNo} &nbsp;·&nbsp; ${docKind} &nbsp;·&nbsp; Due: ${dueFmt} &nbsp;·&nbsp; Now payable: <strong>Rs ${grandTotal.toLocaleString()}</strong> &nbsp;·&nbsp; ${feeStatusLabel(feeSt)} &nbsp;·&nbsp; 3 Copies (Student · College · Bank)</p>
     </div>
     <div class="btn-row">
       <button class="nbtn" style="background:#0d3b1e;color:#fff" onclick="window.print()">🖨️ Print All 3 Copies</button>
@@ -5913,11 +6284,17 @@ function printVoucher(idx){
   showPrintPreview(h, 'Fee Challan — ' + stu.name);
 }
 
-// ── Transport Fee's own dedicated voucher — separate from the main Fee
-// voucher above, since Transport is its own module with its own students,
-// amounts, and due dates. Deliberately simpler (single card, 2 copies)
-// since it's one line item, not a full fee breakdown/instalment schedule.
-function printTransportVoucher(idx){
+// ── Transport Fee's own dedicated voucher / receipt — separate from the main
+// Fee voucher above, since Transport is its own module with its own students,
+// amounts and due dates. Deliberately simpler (single line item, no instalment
+// schedule) but branded, numbered, signed and footed the SAME way, so a parent
+// holding both documents recognises them as coming from one office.
+//
+//   mode 'voucher' → demand slip, 2 copies (Student + Office), page break between
+//   mode 'receipt' → proof of payment, 1 copy
+// Omitting mode picks by money received, which is what the two existing call
+// sites relied on (they passed only an index).
+function printTransportVoucher(idx, mode){
   const t = D.transportFees[idx];
   if(!t){ toast('Transport fee record not found'); return; }
 
@@ -5929,47 +6306,69 @@ function printTransportVoucher(idx){
   const todayClean = new Date(todayRaw); todayClean.setHours(0,0,0,0);
   const dueDateObj = t.dueDate ? parseDate(t.dueDate) : null;
   if(dueDateObj) dueDateObj.setHours(0,0,0,0);
-  const isOverdue = t.status==='Overdue' || (dueDateObj && dueDateObj < todayClean && t.status!=='Paid');
   const diffDays  = dueDateObj ? Math.ceil((dueDateObj - todayClean)/(1000*60*60*24)) : null;
+
+  // ── Money, derived the same way fees are: paid vs payable, never a stored word
+  const tfAmt       = Number(t.amt)||0;
+  const tfPaid      = tfPaidAmt(t);
+  const tfRemaining = tfRemainingAmt(t);
+  const tfStatus    = tfComputeStatus(t);
+  const isPaid      = tfStatus==='Paid';
+  const isOverdue   = tfStatus.indexOf('Overdue')>=0;
+  const isReceipt   = mode ? mode==='receipt' : tfPaid>0;
+  // The big number: what was received (receipt) vs what is still owed (voucher).
+  // A settled record printed as a voucher therefore reads "Rs 0" — the truth —
+  // rather than restating the full fee as if it were still due.
+  const headlineAmt = isReceipt ? tfPaid : tfRemaining;
 
   const fmtDate = (d) => d ? d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}) : '—';
   const todayFmt = fmtDate(todayRaw);
   const dueFmt   = fmtDate(dueDateObj);
-  const voucherNo = 'TRV-' + String(2000+idx+1).padStart(5,'0');
+  // Stable, stored, never index-derived (see getOrAssignTfVoucherNo).
+  const voucherNo = getOrAssignTfVoucherNo(t);
+  const docNo     = isReceipt ? (t.receipt&&t.receipt!=='-'?t.receipt:voucherNo) : voucherNo;
   const academicYear = getAcademicYear();
 
-  const qrPayload = `TRV:${voucherNo}|ROLL:${stu.roll}|AMT:${t.amt}|DUE:${t.dueDate||''}`;
+  // Same key vocabulary as the fee voucher's QR (ROLL/AMT/PAID/REM/DUE); the
+  // leading TRV: tag is kept so anything already scanning these still works.
+  const qrPayload = `TRV:${docNo}|ROLL:${stu.roll}|AMT:${tfAmt}|PAID:${tfPaid}|REM:${tfRemaining}|DUE:${t.dueDate||''}`;
   // Generated locally in-browser — see the note in printVoucher() above for why.
 
   const FONT = `-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Arial,sans-serif`;
   const ink='#0f172a', brand='#0e7490', brandDeep='#0a3d47'; // teal — visually distinct from the main green fee voucher
+  const docTitle = isReceipt ? 'TRANSPORT FEE RECEIPT' : 'TRANSPORT FEE VOUCHER';
 
   const genTfCopy = (copyType) => {
     const stripeClr = copyType==='student' ? brand : '#1d4ed8';
     const stripeSoft = copyType==='student' ? '#ecfeff' : '#eff6ff';
-    const stampLabel = t.status==='Paid' ? 'RECEIPT' : (copyType==='student' ? 'STUDENT COPY' : 'OFFICE COPY');
-    const statusBand = t.status==='Paid'
-      ? `<div style="background:#0d7a4f;color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:700;letter-spacing:.5px">✓ PAID — Receipt ${t.receipt||'—'} — ${t.date||''}</div>`
-      : isOverdue
-        ? `<div style="background:#dc2626;color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:700;letter-spacing:.5px">⚠ OVERDUE — pay immediately</div>`
-        : `<div style="background:${brand};color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:600;letter-spacing:.3px">🚌 Payment due on or before ${dueFmt}</div>`;
+    const stampLabel = isReceipt ? 'STUDENT RECEIPT' : (copyType==='student' ? 'STUDENT COPY' : 'OFFICE COPY');
+    const statusBand = isPaid
+      ? `<div style="background:#0d7a4f;color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:700;letter-spacing:.5px">✓ PAID IN FULL — Receipt ${t.receipt&&t.receipt!=='-'?t.receipt:'—'}${t.date&&t.date!=='-'?' — '+t.date:''}</div>`
+      : tfPaid>0
+        ? `<div style="background:#b45309;color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:700;letter-spacing:.5px">◐ PARTIALLY PAID — Rs ${tfRemaining.toLocaleString()} still due${isOverdue?' — OVERDUE':' by '+dueFmt}</div>`
+        : isOverdue
+          ? `<div style="background:#dc2626;color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:700;letter-spacing:.5px">⚠ OVERDUE${diffDays!==null?' — '+Math.abs(diffDays)+' day(s) past due':''} — pay immediately</div>`
+          : `<div style="background:${brand};color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:600;letter-spacing:.3px">🚌 Payment due on or before ${dueFmt}</div>`;
 
     return `
-<div style="background:#fff;font-family:${FONT};margin-bottom:0;page-break-inside:avoid;border-radius:18px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,.10),0 1px 3px rgba(15,23,42,.08);border:1px solid #eef0f2">
+<div class="vch-copy" style="background:#fff;font-family:${FONT};margin-bottom:0;page-break-inside:avoid;border-radius:18px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,.10),0 1px 3px rgba(15,23,42,.08);border:1px solid #eef0f2">
   <div style="background:linear-gradient(135deg,${brandDeep},${brand});padding:0">
     <div style="display:flex;align-items:stretch;min-height:88px">
       <div style="width:76px;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:14px 10px">
-        <div style="width:52px;height:52px;border-radius:16px;background:rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:22px;border:1px solid rgba(255,255,255,.25)">🚌</div>
+        <div style="width:52px;height:52px;border-radius:16px;background:rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;color:#fff;border:1px solid rgba(255,255,255,.25);overflow:hidden">${getLogoBadgeInner()}</div>
       </div>
       <div style="flex:1;padding:16px 14px 14px 4px;display:flex;flex-direction:column;justify-content:center">
         <div style="font-size:18px;font-weight:800;color:#fff;letter-spacing:-.2px;line-height:1.15">${D.settings.instName||''}</div>
         <div style="font-size:10.5px;color:rgba(255,255,255,.65);margin-top:3px;font-weight:500">${D.settings.city||''} · Transport Office · AY ${academicYear}</div>
-        <div style="margin-top:9px"><span style="background:rgba(255,255,255,.16);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:4px 12px;border-radius:20px">TRANSPORT FEE VOUCHER</span></div>
+        <div style="margin-top:9px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span style="background:rgba(255,255,255,.16);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:4px 12px;border-radius:20px">🚌 ${docTitle}</span>
+          ${vchStatusBadge(tfStatus,{size:9.5,pad:'3px 10px',radius:'20px'})}
+        </div>
       </div>
       <div style="width:120px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px 10px">
         <div style="background:rgba(255,255,255,.12);border-radius:10px;padding:5px 10px;text-align:center;width:100%">
-          <div style="font-size:7.5px;color:rgba(255,255,255,.6);letter-spacing:1px;text-transform:uppercase;font-weight:600">Voucher No.</div>
-          <div style="font-size:12px;font-weight:800;color:#fff;margin-top:1px">${voucherNo}</div>
+          <div style="font-size:7.5px;color:rgba(255,255,255,.6);letter-spacing:1px;text-transform:uppercase;font-weight:600">${isReceipt?'Receipt No.':'Voucher No.'}</div>
+          <div style="font-size:12px;font-weight:800;color:#fff;margin-top:1px">${docNo}</div>
         </div>
         <div class="qr-slot" data-qr="${qrPayload}" style="width:52px;height:52px;background:#fff;padding:3px;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
         <div style="background:rgba(255,255,255,.9);color:${stripeClr};font-size:8px;font-weight:800;letter-spacing:1px;padding:3px 9px;text-transform:uppercase;border-radius:20px">${stampLabel}</div>
@@ -5982,7 +6381,9 @@ function printTransportVoucher(idx){
       <div style="font-size:9.5px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${stripeClr};margin-bottom:10px">Student Information</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px">
         <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">STUDENT NAME</div><div style="font-size:14px;font-weight:700;color:${ink}">${stu.name}</div></div>
+        <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">FATHER'S NAME</div><div style="font-size:12.5px;color:#334155">${stu.father||'—'}</div></div>
         <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">ROLL NUMBER</div><div style="font-size:12.5px;font-weight:700;color:${stripeClr}">${stu.roll}</div></div>
+        <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">STUDENT ID</div><div style="font-size:12px;color:#334155">${stu.id||'—'}</div></div>
         <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">PROGRAM</div><div style="font-size:12px;color:#334155">${(stu.cls||'—').replace('Inter-','')} · ${stu.dept||'—'}</div></div>
         <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">SEMESTER / SECTION</div><div style="font-size:12px;color:#334155">${stu.sem||'—'} · ${stu.section||'—'}</div></div>
       </div>
@@ -5991,47 +6392,61 @@ function printTransportVoucher(idx){
     <div style="background:${stripeSoft};border-radius:12px;padding:14px 16px;margin-bottom:16px">
       <div style="font-size:9.5px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${stripeClr};margin-bottom:10px">Route Details</div>
       <div style="font-size:13px;font-weight:600;color:${ink}">🚌 ${t.route||'Route not specified'}</div>
-      <div style="font-size:10px;color:#64748b;margin-top:6px">Issued ${todayFmt} · Due ${dueFmt}${diffDays!==null&&diffDays>=0&&t.status!=='Paid'?' · '+diffDays+' day(s) remaining':''}</div>
+      <div style="font-size:10px;color:#64748b;margin-top:6px">Issued ${todayFmt} · Due ${dueFmt}${diffDays!==null&&diffDays>=0&&!isPaid?' · '+diffDays+' day(s) remaining':''}${isReceipt&&t.date&&t.date!=='-'?' · Received '+t.date+(t.method&&t.method!=='-'?' ('+t.method+')':''):''}</div>
     </div>
 
+    <!-- AMOUNT BOX — Transport Fee / Paid / Remaining, all three always printed
+         (Rs 0 included), same structure as the main fee voucher's amount box. -->
     <div style="border-radius:14px;overflow:hidden;margin-bottom:14px;background:linear-gradient(135deg,${brandDeep},${brand})">
-      <div style="padding:8px 16px"><div style="font-size:9.5px;font-weight:700;color:rgba(255,255,255,.8);letter-spacing:1px;text-transform:uppercase">Transport Fee Amount</div></div>
+      <div style="padding:8px 16px"><div style="font-size:9.5px;font-weight:700;color:rgba(255,255,255,.8);letter-spacing:1px;text-transform:uppercase">${isReceipt?'Transport Fee — Amount Received':'Transport Fee — Amount Due'}</div></div>
       <div style="display:flex;align-items:center;padding:6px 16px 16px;gap:16px">
         <div style="flex:1">
-          <div style="font-size:32px;font-weight:800;color:#fff;line-height:1;letter-spacing:-.5px">Rs ${t.amt.toLocaleString()}</div>
-          <div style="font-size:10px;color:rgba(255,255,255,.65);margin-top:5px">${amountInWords(t.amt)}</div>
+          <div style="font-size:32px;font-weight:800;color:#fff;line-height:1;letter-spacing:-.5px">Rs ${headlineAmt.toLocaleString()}</div>
+          <div style="font-size:10px;color:rgba(255,255,255,.65);margin-top:5px">${amountInWords(headlineAmt)}</div>
         </div>
         <div style="text-align:center">
-          <div style="background:rgba(255,255,255,.14);border-radius:8px;padding:7px 14px">
-            <div style="font-size:11px;font-weight:800;letter-spacing:2px;color:#fff">${t.status.toUpperCase()}</div>
+          <div style="background:rgba(255,255,255,.14);border-radius:8px;padding:7px 14px;margin-bottom:5px">
+            <div style="font-size:11px;font-weight:800;letter-spacing:2px;color:#fff">${feeStatusLabel(tfStatus)}</div>
           </div>
+          <div style="font-size:8px;color:rgba(255,255,255,.5);font-weight:600;text-transform:uppercase;letter-spacing:.5px">Office Stamp</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:1px;background:rgba(255,255,255,.15)">
+        <div style="flex:1;padding:7px 16px">
+          <div style="font-size:8px;color:rgba(255,255,255,.6);font-weight:700;letter-spacing:.8px;text-transform:uppercase">Transport Fee</div>
+          <div style="font-size:13px;font-weight:800;color:#fff;margin-top:1px">Rs ${tfAmt.toLocaleString()}</div>
+        </div>
+        <div style="flex:1;padding:7px 16px">
+          <div style="font-size:8px;color:rgba(255,255,255,.6);font-weight:700;letter-spacing:.8px;text-transform:uppercase">Paid Amount</div>
+          <div style="font-size:13px;font-weight:800;color:#bbf7d0;margin-top:1px">Rs ${tfPaid.toLocaleString()}</div>
+        </div>
+        <div style="flex:1;padding:7px 16px">
+          <div style="font-size:8px;color:rgba(255,255,255,.6);font-weight:700;letter-spacing:.8px;text-transform:uppercase">Remaining Amount</div>
+          <div style="font-size:13px;font-weight:800;color:${tfRemaining>0?'#fecaca':'#bbf7d0'};margin-top:1px">Rs ${tfRemaining.toLocaleString()}</div>
         </div>
       </div>
     </div>
 
-    <div style="background:#f8fafc;border-radius:12px;padding:12px 14px;margin-bottom:14px">
-      <div style="font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${stripeClr};margin-bottom:8px">Payment Instructions</div>
-      <div style="font-size:10.5px;color:#475569;line-height:1.9">
-        Pay <strong>on or before</strong> the due date at the <strong>College Accounts / Transport Office</strong>.<br>
-        Cashier will stamp and sign — <strong>retain your copy as proof.</strong><br>
-        Queries: <strong>042-35761234</strong> · Office hours 9am–3pm (Mon–Sat)
+    <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+      <div style="flex:1;min-width:220px;background:#f8fafc;border-radius:12px;padding:12px 14px">
+        <div style="font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${stripeClr};margin-bottom:8px">${isReceipt?'Notes':'Payment Instructions'}</div>
+        <div style="font-size:10.5px;color:#475569;line-height:1.9">
+          ${isReceipt
+            ? `Received with thanks against the transport fee shown above.<br>
+               Retain this receipt as <strong>proof of payment</strong>.<br>
+               Fee once paid is non-refundable and non-transferable.<br>`
+            : `Pay <strong>on or before</strong> the due date at the <strong>College Accounts / Transport Office</strong>.<br>
+               Cashier will stamp and sign — <strong>retain your copy as proof.</strong><br>
+               Bus service may be suspended if the fee stays unpaid past the due date.<br>`}
+          Queries: <strong>${D.settings.accountsPhone||D.settings.contact||'—'}</strong>${D.settings.officeHours?' · Office hours '+D.settings.officeHours:''}
+        </div>
       </div>
+      ${vchBankBlock(stripeClr,stripeSoft)}
     </div>
 
-    <div style="display:flex;gap:0;background:#f8fafc;border-radius:12px;overflow:hidden">
-      <div style="flex:1;padding:12px 14px;text-align:center">
-        <div style="height:26px;border-bottom:1.5px solid #cbd5e1;margin-bottom:6px"></div>
-        <div style="font-size:8px;font-weight:700;color:#94a3b8;letter-spacing:.5px;text-transform:uppercase">Student / Parent Signature</div>
-      </div>
-      <div style="flex:1;padding:12px 14px;text-align:center;border-left:1px solid #e2e8f0">
-        <div style="height:26px;border-bottom:1.5px dashed #cbd5e1;margin-bottom:6px"></div>
-        <div style="font-size:8px;font-weight:700;color:#94a3b8;letter-spacing:.5px;text-transform:uppercase">Transport Officer / Cashier</div>
-      </div>
-    </div>
+    ${vchSignatureRow('Student / Parent Signature','Transport Officer / Cashier')}
 
-    <div style="margin-top:12px;text-align:center">
-      <div style="font-size:9px;color:#94a3b8">Generated ${todayFmt} · Voucher ${voucherNo} · Computer-generated, no signature required for issuance</div>
-    </div>
+    ${vchFooter((isReceipt?'Receipt ':'Voucher ')+docNo,D.settings.instName||'')}
   </div>
 </div>`;
   };
@@ -6048,26 +6463,27 @@ function printTransportVoucher(idx){
     .nbtn{padding:9px 18px;border:none;border-radius:6px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit}
     .cut-line{display:flex;align-items:center;gap:10px;margin:16px 0;color:#9ca3af;font-size:10.5px;font-family:Arial,sans-serif}
     .cut-line::before,.cut-line::after{content:'';flex:1;border-top:1.5px dashed #cbd5e1}
-    @media print{ body{background:#fff;padding:0;} .no-print{display:none!important;} .page-break{page-break-after:always;} }`;
+    ${vchPrintCss('A4')}
+    @media print{
+      .vch-copy{box-shadow:none!important;border-radius:0!important;border:none!important;}
+    }`;
 
-  const docLabel = t.status==='Paid' ? 'Transport Fee Receipt' : 'Transport Fee Voucher';
-  const h = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${docLabel} — ${stu.name} — ${voucherNo}</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><style>${css}</style></head><body>
+  const docLabel = isReceipt ? 'Transport Fee Receipt' : 'Transport Fee Voucher';
+  const h = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${docLabel} — ${stu.name} — ${docNo}</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><style>${css}</style></head><body>
   <div class="no-print">
     <div class="no-print-left">
       <h3>🚌 ${docLabel} — ${stu.name}</h3>
-      <p>${voucherNo} &nbsp;·&nbsp; Route: ${t.route||'—'} &nbsp;·&nbsp; Due: ${dueFmt} &nbsp;·&nbsp; Amount: <strong>Rs ${t.amt.toLocaleString()}</strong></p>
+      <p>${docNo} &nbsp;·&nbsp; Route: ${t.route||'—'} &nbsp;·&nbsp; Due: ${dueFmt} &nbsp;·&nbsp; Fee: <strong>Rs ${tfAmt.toLocaleString()}</strong> &nbsp;·&nbsp; Paid: <strong>Rs ${tfPaid.toLocaleString()}</strong> &nbsp;·&nbsp; Remaining: <strong>Rs ${tfRemaining.toLocaleString()}</strong> &nbsp;·&nbsp; ${feeStatusLabel(tfStatus)}</p>
     </div>
     <div class="btn-row">
-      ${t.status==='Paid'
-        ? `<button class="nbtn" style="background:${brandDeep};color:#fff" onclick="window.print()">🖨️ Print Receipt</button>`
-        : `<button class="nbtn" style="background:${brandDeep};color:#fff" onclick="window.print()">🖨️ Print Both Copies</button>`}
+      <button class="nbtn" style="background:${brandDeep};color:#fff" onclick="window.print()">🖨️ ${isReceipt?'Print Receipt':'Print Both Copies'}</button>
+      <button class="nbtn" style="background:#1d4ed8;color:#fff" onclick="window.print()" title="Choose Save as PDF in print dialog">⬇️ Save as PDF</button>
     </div>
   </div>
-  ${t.status==='Paid'
+  ${isReceipt
     ? genTfCopy('student')
     : `${genTfCopy('student')}
-  <div class="cut-line"><span>✂ cut here — Office Copy Below ✂</span></div>
-  <div class="page-break"></div>
+  <div class="cut-line"><span>✂ cut here — Office Copy below ✂</span></div>
   ${genTfCopy('office')}`}
   <script>
     (function renderQrSlots(attemptsLeft){
@@ -6078,13 +6494,13 @@ function printTransportVoucher(idx){
       document.querySelectorAll('.qr-slot').forEach(function(el){
         if (el.dataset.rendered) return;
         el.dataset.rendered = '1';
-        new QRCode(el, { text: el.dataset.qr, width: 52, height: 52, colorDark: '#0d3b1e', colorLight: '#ffffff' });
+        new QRCode(el, { text: el.dataset.qr, width: 52, height: 52, colorDark: '#0a3d47', colorLight: '#ffffff' });
       });
     })(25);
   </script>
   </body></html>`;
 
-  showPrintPreview(h, (t.status==='Paid'?'Transport Fee Receipt — ':'Transport Fee Voucher — ') + stu.name);
+  showPrintPreview(h, docLabel + ' — ' + stu.name);
 }
 
 
@@ -8151,7 +8567,7 @@ function exportReport(format){
       var tfPaid=filteredTransportFees.filter(t=>t.roll===s.roll&&t.status==='Paid').reduce((a,b)=>a+b.amt,0);
       var tfBilled=filteredTransportFees.filter(t=>t.roll===s.roll).reduce((a,b)=>a+b.amt,0);
       var billed=myFees.reduce((a,f)=>a+(f.amt||0),0)+tfBilled;
-      return[s.name,s.roll,s.cls||'',s.gender||'',billed,relief,paid,tfPaid,Math.max(0,billed-paid-tfPaid),studentFeeStatus(s)];
+      return[s.name,s.roll,s.cls||'',s.gender||'',billed,relief,paid,tfPaid,Math.max(0,billed-paid-tfPaid),feeStatusLabel(studentFeeStatus(s))];
     });
     colWidths=[25,15,14,10,15,13,15,15,14,10];
   } else if(type==='salary'){
@@ -8179,7 +8595,7 @@ function exportReport(format){
       ? D.students.filter(s=>s.gender==='Female'&&(s.cls||'').startsWith('Inter-'))
       : D.students;
     // Derived status, not the cached s.status — see printStudents().
-    rows=stuArr2.map(s=>[s.name,s.roll,s.cls||'',s.gender||'',s.sem||'',s.fee||0,studentScholarshipLabel(s)||'-',studentOutstanding(s),studentFeeStatus(s)]);
+    rows=stuArr2.map(s=>[s.name,s.roll,s.cls||'',s.gender||'',s.sem||'',s.fee||0,studentScholarshipLabel(s)||'-',studentOutstanding(s),feeStatusLabel(studentFeeStatus(s))]);
     colWidths=[25,15,14,10,10,12,20,16,10];
   } else if(type==='annual'){
     // Multi-section annual export
@@ -8504,8 +8920,8 @@ let _remState = {
 // three helpers derive the truth from the fee records themselves, and every
 // reminder screen now reads them instead of the cached string.
 function studentTfRemaining(s){
-  return (D.transportFees||[]).filter(t=>t.roll===s.roll&&t.status!=='Paid')
-    .reduce((a,b)=>a+(Number(b.amt)||0),0);
+  return (D.transportFees||[]).filter(t=>t.roll===s.roll)
+    .reduce((a,b)=>a+tfRemainingAmt(b),0);
 }
 function studentOutstanding(s){
   const feePart=D.fees.filter(f=>f.roll===s.roll).reduce((a,b)=>a+feeRemainingAmt(b),0);
@@ -8518,11 +8934,26 @@ function studentFeeStatus(s){
   // student still appears where the clerk expects them.
   if(!mine.length&&!tfMine.length) return s.status||'Pending';
   const feeOwed=mine.some(f=>feeRemainingAmt(f)>0);
-  const tfOwed=tfMine.some(t=>t.status!=='Paid');
+  const tfOwed=tfMine.some(t=>tfRemainingAmt(t)>0);
   if(!feeOwed&&!tfOwed) return 'Paid';
   const overdue=mine.some(f=>feeRemainingAmt(f)>0&&feeComputeStatus(f).indexOf('Overdue')>=0)
-    || tfMine.some(t=>t.status==='Overdue');
+    || tfMine.some(t=>tfComputeStatus(t).indexOf('Overdue')>=0);
+  // Money HAS been received, just not all of it → PARTIALLY PAID, not PENDING.
+  // Callers that compare this against a literal ('Pending' / 'Overdue') must use
+  // studentOwes() / the .indexOf('Overdue') form instead — see rStudents(),
+  // getReminderStudents().
+  const somePaid=mine.some(f=>feePaidAmt(f)>0)||tfMine.some(t=>tfPaidAmt(t)>0);
+  if(somePaid) return overdue?'Partial-Overdue':'Partial';
   return overdue?'Overdue':'Pending';
+}
+// Bucket helpers so the new 'Partial' / 'Partial-Overdue' statuses can't silently
+// fall out of a filter or a head-count that used to test === 'Pending'.
+function studentOwes(s){ return studentFeeStatus(s)!=='Paid'; }
+function studentIsOverdue(s){ return studentFeeStatus(s).indexOf('Overdue')>=0; }
+// "Not yet cleared, but not late either" — Pending or Partial.
+function studentIsPendingBucket(s){
+  const st=studentFeeStatus(s);
+  return st==='Pending'||st==='Partial';
 }
 function feeDefaulters(){
   return D.students.filter(s=>studentFeeStatus(s)!=='Paid');
@@ -8530,10 +8961,14 @@ function feeDefaulters(){
 
 function getReminderStudents() {
   const f = _remState.filter;
+  // 'both' means "everyone who still owes something" — a partially-paid student
+  // has an outstanding balance too, so an exact === 'Pending' || === 'Overdue'
+  // test would silently drop them from every reminder run.
   return D.students.filter(s => {
-    const st = studentFeeStatus(s);
-    if (f === 'both') return st === 'Pending' || st === 'Overdue';
-    return st === f;
+    if (f === 'both') return studentOwes(s);
+    if (f === 'Overdue') return studentIsOverdue(s);
+    if (f === 'Pending') return studentIsPendingBucket(s);
+    return studentFeeStatus(s) === f;
   });
 }
 
@@ -8550,13 +8985,14 @@ function buildReminderTable() {
     const st = studentFeeStatus(s);
     const amt = getStudentDueFee(s);
     const checked = _remState.selected.has(s.roll);
-    const statusCls = st === 'Overdue' ? 'badge bg-r' : 'badge bg-y';
+    const isLate = st.indexOf('Overdue') >= 0;
+    const statusCls = isLate ? 'badge bg-r' : 'badge bg-y';
     const phone = (s.contact||'').replace(/\D/g,'');
     return `<tr id="rem-row-${i}">
       <td><input type="checkbox" class="rem-chk" data-roll="${htmlEsc(s.roll)}" ${checked ? 'checked' : ''} onchange="reminderToggle('${htmlEsc(s.roll)}',this.checked)" style="cursor:pointer"></td>
       <td>
         <div style="display:flex;align-items:center;gap:8px">
-          <div style="width:28px;height:28px;border-radius:50%;background:${st==='Overdue'?'var(--rd)':'var(--yl)'};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">${htmlEsc((s.name||'?')[0])}</div>
+          <div style="width:28px;height:28px;border-radius:50%;background:${isLate?'var(--rd)':'var(--yl)'};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0">${htmlEsc((s.name||'?')[0])}</div>
           <div>
             <div style="font-size:13px;font-weight:600;color:var(--s6)">${htmlEsc(s.name||'')}</div>
             <div style="font-size:11px;color:var(--s4)">${htmlEsc(s.father||'')}</div>
@@ -8567,7 +9003,7 @@ function buildReminderTable() {
       <td style="font-size:12px">${htmlEsc(s.cls||s.dept||'')}</td>
       <td style="font-size:12px;color:${phone?'var(--bl)':'#b91c1c'}">${phone?htmlEsc(s.contact):'⚠️ no number'}</td>
       <td style="font-weight:700;color:var(--rd)">Rs ${fmt(amt)}</td>
-      <td><span class="${statusCls}">${st}</span></td>
+      <td><span class="${statusCls}">${feeStatusLabel(st)}</span></td>
     </tr>`;
   }).join('');
   updateRemSummary();
@@ -8662,7 +9098,7 @@ function openReminderModal(channel) {
       const st=studentFeeStatus(s);
       const phone=(s.contact||'').replace(/\D/g,'');
       return `<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:${i<selStudents.length-1?'1px solid var(--s1)':'none'};${phone?'':'opacity:.6'}">
-        <div style="width:26px;height:26px;border-radius:50%;background:${st==='Overdue'?'var(--rd)':'var(--yl)'};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0">${htmlEsc((s.name||'?')[0])}</div>
+        <div style="width:26px;height:26px;border-radius:50%;background:${st.indexOf('Overdue')>=0?'var(--rd)':'var(--yl)'};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0">${htmlEsc((s.name||'?')[0])}</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:13px;font-weight:600;color:var(--s6)">${htmlEsc(s.name||'')}</div>
           <div style="font-size:11px;color:${phone?'var(--s4)':'#b91c1c'}">${phone?htmlEsc(s.contact):'⚠️ No contact — will be skipped'} · ${htmlEsc(s.roll)}</div>
@@ -8758,7 +9194,7 @@ function confirmSendReminders() {
 }
 
 function selectAllOverdue() {
-  const overdue=D.students.filter(s=>studentFeeStatus(s)==='Overdue');
+  const overdue=D.students.filter(studentIsOverdue);
   if(!overdue.length){toast('✅ No overdue student right now');return;}
   overdue.forEach(s=>_remState.selected.add(s.roll));
   buildReminderTable();
@@ -8770,7 +9206,7 @@ function printReminderList() {
   if (!selStudents.length) { toast('⚠️ Please select at least one student'); return; }
   const rows = selStudents.map(s => {
     const amt=getStudentDueFee(s);
-    return `<tr><td>${htmlEsc(s.name||'')}</td><td>${htmlEsc(s.father||'')}</td><td>${htmlEsc(s.roll)}</td><td>${htmlEsc(s.cls||'')}</td><td>${htmlEsc(s.contact||'—')}</td><td>Rs ${fmt(amt)}</td><td>${studentFeeStatus(s)}</td></tr>`;
+    return `<tr><td>${htmlEsc(s.name||'')}</td><td>${htmlEsc(s.father||'')}</td><td>${htmlEsc(s.roll)}</td><td>${htmlEsc(s.cls||'')}</td><td>${htmlEsc(s.contact||'—')}</td><td>Rs ${fmt(amt)}</td><td>${feeStatusLabel(studentFeeStatus(s))}</td></tr>`;
   }).join('');
   const h = `<html><head><meta charset="UTF-8"><style>*{box-sizing:border-box;}body{font-family:Arial,sans-serif;padding:22px;}h2{color:#1a6636;font-size:18px;margin-bottom:4px;}.inf{font-size:12px;color:#666;margin-bottom:14px;}table{width:100%;border-collapse:collapse;}th{background:#1a6636;color:#fff;padding:7px 9px;text-align:left;font-size:11px;}td{padding:7px 9px;border-bottom:1px solid #e0e0e0;font-size:12px;}tr:nth-child(even)td{background:#f5faf6;}@media print{button{display:none}}</style></head><body><h2>${D.settings.instName} — Fee Reminder List</h2><div class="inf">Generated: ${new Date().toLocaleString()} | Total: ${selStudents.length} students</div><table><thead><tr><th>Name</th><th>Father</th><th>Roll No</th><th>Program</th><th>Contact</th><th>Amount Due</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table><div style="margin-top:12px"><button onclick="window.print()" style="padding:7px 16px;background:#1a6636;color:#fff;border:none;border-radius:6px;cursor:pointer;">Print</button></div></body></html>`;
   showPrintPreview(h, 'Fee Reminder List');
@@ -9221,7 +9657,14 @@ function feeComputeStatus(f){
   return overdue?'Overdue':'Pending';
 }
 function feeStatusLabel(status){
-  return {Paid:'PAID',Partial:'PARTIALLY PAID','Partial-Overdue':'PARTIALLY PAID (OVERDUE)',Overdue:'OVERDUE',Pending:'UNPAID'}[status]||status.toUpperCase();
+  // The four statuses the college actually uses on paper:
+  //   nothing received            → PENDING
+  //   some received, not all      → PARTIALLY PAID
+  //   everything received         → PAID
+  //   due date passed, still owed → OVERDUE
+  // 'Pending' used to render as "UNPAID", which read like a different state from
+  // the "Pending" shown elsewhere in the app for the very same record.
+  return {Paid:'PAID',Partial:'PARTIALLY PAID','Partial-Overdue':'PARTIALLY PAID (OVERDUE)',Overdue:'OVERDUE',Pending:'PENDING'}[status]||String(status||'').toUpperCase();
 }
 
 /* ══════════════════════════════════════════════════
@@ -9504,7 +9947,10 @@ function feeRollLookup(val){
       const isOvr=dueDt&&dueDt<today;
       const diffDays=dueDt?Math.ceil((dueDt-today)/(1000*60*60*24)):null;
       const rowPaid=feePaidAmt(f), rowRem=feeRemainingAmt(f);
-      const rowLbl=rowPaid>0?(isOvr?'⚠️ PART PAID · OVERDUE':'🟡 PART PAID'):(isOvr?'⚠️ OVERDUE':'⏳ PENDING');
+      // Same words as every voucher/receipt — feeStatusLabel is the single source
+      // for the four statuses; the emoji is decoration on top of it.
+      const rowSt=feeComputeStatus(f);
+      const rowLbl=(rowSt==='Paid'?'✅ ':rowSt.indexOf('Overdue')>=0?'⚠️ ':rowPaid>0?'🟡 ':'⏳ ')+feeStatusLabel(rowSt);
       html+=`<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:${isOvr?'#fff1f1':'var(--s0)'};border:1px solid ${isOvr?'#fca5a5':'var(--s2)'};margin-bottom:5px">
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;font-weight:700;color:${isOvr?'var(--rd)':'var(--s6)'}">${rowLbl} ${f.isInstalment?'· Inst '+f.instPart:''}</div>
