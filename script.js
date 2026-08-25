@@ -2816,7 +2816,13 @@ function saveEmp(){
   const editIdx=parseInt($('empIdx').value);const isEdit=editIdx>=0;
   const nameVal=$('en').value.trim();const desigVal=$('ed').value.trim();
   if(!nameVal){toast('Employee name is required');return;}
-  const e={id:isEdit?D.employees[editIdx].id:genEmpId(),name:nameVal,desig:desigVal||'Staff',contact:$('ec').value.trim()||'-',address:$('eaddr').value.trim()||'-',email:$('ee').value.trim()||'-',dept:$('edp').value,salary:parseInt($('es').value)||60000,allow:parseInt($('ea').value)||10000,status:$('est').value};
+  // A negative salary or allowance would flow straight into the payroll totals
+  // and the ledger, so reject it here rather than storing it and hunting it
+  // down in a report later. Blank still falls back to the existing defaults.
+  const salVal=parseInt($('es').value), allowVal=parseInt($('ea').value);
+  if(salVal<0){toast('❌ Basic salary cannot be negative');return;}
+  if(allowVal<0){toast('❌ Allowances cannot be negative');return;}
+  const e={id:isEdit?D.employees[editIdx].id:genEmpId(),name:nameVal,desig:desigVal||'Staff',contact:$('ec').value.trim()||'-',address:$('eaddr').value.trim()||'-',email:$('ee').value.trim()||'-',dept:$('edp').value,salary:salVal||60000,allow:allowVal||10000,status:$('est').value};
   if(isEdit){
     const old=D.employees[editIdx];
     const salaryChanged=old.salary!==e.salary||old.allow!==e.allow||old.desig!==e.desig||old.dept!==e.dept;
@@ -4272,6 +4278,10 @@ function saveFee(){
   const stuName=($('fn')||{}).value||'';
   const fa=$('fa').value.trim();
   if(!stuName||!stuRoll||!fa){toast('Student and Amount are required');return;}
+  // A negative fee would make amt negative and flip every derived figure
+  // (remaining, status, ledger totals) on its head, so it is refused up front.
+  if(parseInt(fa)<0){toast('❌ Fee amount cannot be negative');return;}
+  if(parseInt(($('fConc')||{}).value)<0){toast('❌ Concession cannot be negative');return;}
 
   // ── INSTALMENT RECORD: partial-payment path ──────────────────────────
   // Status here is always DERIVED from paidAmt vs amt (never chosen from a
@@ -4279,6 +4289,10 @@ function saveFee(){
   // silently overwriting the previous one.
   if(isEdit && D.fees[editIdx] && D.fees[editIdx].isInstalment){
     const f=D.fees[editIdx];
+    // Final server-side-style guard: instalments must be paid in order, even
+    // if the disabled-field UI lock was somehow bypassed.
+    const earlierUnpaidSave=instPlanRows(f).find(r=>(r.instIdx??0)<(f.instIdx??0)&&feeComputeStatus(r)!=='Paid');
+    if(earlierUnpaidSave){toast('⚠️ Collect Instalment '+earlierUnpaidSave.instPart+' first — instalments must be paid in order');return;}
     const already=feePaidAmt(f);
     let payNow=parseInt(($('fPayNow')||{}).value)||0;
     payNow=Math.max(0,Math.min(payNow, f.amt-already)); // never allow paid > payable
@@ -4747,7 +4761,23 @@ function openEditFee(idx){
     // amount paid, never chosen manually, so it can't drift out of sync.
     $('fStatusWrap').style.display='none';
     $('fPartialPayWrap').style.display='block';
-    $('fPayNow').value=feeRemainingAmt(f);
+    // Leave "Amount Being Paid Now" EMPTY by default (same as the non-instalment
+    // branch below) instead of pre-filling the full remaining balance. A
+    // pre-filled full amount meant clicking Save without editing this field —
+    // e.g. after opening the record just to view/print a voucher — silently
+    // recorded the whole instalment as paid even though nothing was collected.
+    $('fPayNow').value='';
+    // Instalments must be collected IN ORDER. If an earlier instalment in this
+    // plan is still unpaid, lock the payment field here too — this modal is
+    // reachable directly via the row's "Edit" button, not just quickCollect(),
+    // so the order guard has to live here as well, not only in quickCollect().
+    const planRowsEdit=instPlanRows(f);
+    const earlierUnpaidEdit=planRowsEdit.find(r=>(r.instIdx??0)<(f.instIdx??0)&&feeComputeStatus(r)!=='Paid');
+    if($('fPayNow')) $('fPayNow').disabled=!!earlierUnpaidEdit;
+    if(earlierUnpaidEdit){
+      const box=$('fPay-preview');
+      if(box){ box.style.color='var(--rd)'; box.textContent='⚠️ Collect Instalment '+earlierUnpaidEdit.instPart+' first — instalments must be paid in order.'; }
+    }
     feePreviewPartial(); // fills Already Paid / Total Payable / preview + cap
     $('fst').value=feeComputeStatus(f)==='Paid'?'Paid':'Pending'; // kept in sync for saveFee's isEdit branch, but not shown
   }else{
@@ -5486,10 +5516,18 @@ function printReceipt(idx, paymentAmount){
   const receivedNow = paymentAmount!=null ? paymentAmount : feePaidAmt(f);
 
   const todayFmt = new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
-  const academicYear = getAcademicYear();
+  // Honour the Settings value (also shown on the Dashboard) and fall back to the
+  // computed year, so every voucher/receipt and the Dashboard print ONE academic
+  // year. Reading getAcademicYear() directly made this slip print a different
+  // year from the instalment voucher whenever the setting was customised.
+  const academicYear = D.settings.academicYear || getAcademicYear();
   // Existing keys (RCPT/ROLL/AMT/DATE) keep their meaning so any scanner already
   // in use still reads this; PAID/REM are appended for parity with the voucher QR.
-  const qrPayload = `RCPT:${f.receipt||''}|ROLL:${f.roll}|AMT:${receivedNow}|DATE:${f.date||''}|PAID:${feePaidAmt(f)}|REM:${feeRemainingAmt(f)}`;
+  // '-' is this app's placeholder for "not set", and it is truthy — so `||''`
+  // let a bare dash through into the QR, the window title and the footer.
+  const rcNo   = (f.receipt&&f.receipt!=='-') ? f.receipt : '';
+  const rcDate = (f.date&&f.date!=='-') ? f.date : '';
+  const qrPayload = `RCPT:${rcNo}|ROLL:${f.roll}|AMT:${receivedNow}|DATE:${rcDate}|PAID:${feePaidAmt(f)}|REM:${feeRemainingAmt(f)}`;
 
   // ── Instalment math: total fee, paid-to-date, and what's still owed ──
   const isInstalment = !!(f.isInstalment && f.instTotal);
@@ -5561,7 +5599,7 @@ function printReceipt(idx, paymentAmount){
   const infoRow=(l,v)=>`<tr><td style="padding:5px 2px;color:#64748b;font-size:10.5px;width:38%">${l}</td><td style="padding:5px 2px;font-weight:700;color:#0f172a;font-size:11.5px">${v}</td></tr>`;
 
   const h=`<!DOCTYPE html><html><head><meta charset="UTF-8">
-  <title>Fee Receipt — ${f.student} — ${f.receipt||''}</title>
+  <title>Fee Receipt — ${f.student}${rcNo?' — '+rcNo:''}</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0;}
@@ -5716,7 +5754,7 @@ function printReceipt(idx, paymentAmount){
       <div style="margin-top:16px;font-size:8.5px;color:#94a3b8;line-height:1.6;border-top:1px solid #eef0f2;padding-top:10px">
         This is a computer-generated receipt issued against the amount received above. Please retain it as proof of payment. Fee once paid is non-refundable and non-transferable. Scan the QR code above to verify this receipt online.
       </div>
-      ${vchFooter(f.receipt||'',D.settings.instName||'')}
+      ${vchFooter(rcNo?'Receipt '+rcNo:'',D.settings.instName||'')}
     </div>
   </div>
   <script>
@@ -5817,7 +5855,11 @@ function printVoucher(idx){
   }
   const voucherNo = f.challanNo;
 
-  const academicYear = getAcademicYear();
+  // Honour the Settings value (also shown on the Dashboard) and fall back to the
+  // computed year, so every voucher/receipt and the Dashboard print ONE academic
+  // year. Reading getAcademicYear() directly made this slip print a different
+  // year from the instalment voucher whenever the setting was customised.
+  const academicYear = D.settings.academicYear || getAcademicYear();
   const expiryObj    = new Date(todayRaw); expiryObj.setDate(expiryObj.getDate()+30);
   const expiryFmt    = fmtDate(expiryObj);
 
@@ -5850,8 +5892,6 @@ function printVoucher(idx){
   // What the student must actually hand over: the unpaid balance (NOT the full
   // billed amount — a part-payment may already be on record) plus the extras.
   const grandTotal = stillOwed + extraChargesTotal;
-  // Same key names/order as printInstalmentVouchers' payload so one scanner reads both.
-  const qrPayload = `VCH:${voucherNo}|ROLL:${stu.roll}|AMT:${grandTotal}|PAID:${alreadyPaid}|REM:${stillOwed}|DUE:${f.dueDate||''}`;
 
   // Late fee already baked into f.amt (via Apply Late Fee) — split it back out
   // so it still shows as its own line item on the voucher instead of being
@@ -5945,6 +5985,17 @@ function printVoucher(idx){
   // glance, not by reading one small word: they get a different title, a
   // different accent colour and a different sub-line.
   const docKind = isInstalment ? `INSTALMENT VOUCHER — ${instOrdinal} OF ${totalCount}` : 'FULL FEE VOUCHER';
+
+  // ── QR payload ───────────────────────────────────────────────────────────
+  // Built HERE, after the plan totals above, because PAID/REM must mirror the
+  // Paid/Remaining strip printed on the same copy — for an instalment challan
+  // that strip is plan-level, not row-level, so a scan can never contradict the
+  // figures a parent is reading. AMT stays the amount payable on THIS challan,
+  // which is what a bank teller needs. Same key names/order as
+  // printInstalmentVouchers' payload so one scanner reads both.
+  const qrPaid = isInstalment ? paidAmt   : alreadyPaid;
+  const qrRem  = isInstalment ? remainAmt : stillOwed;
+  const qrPayload = `VCH:${voucherNo}|ROLL:${stu.roll}|AMT:${grandTotal}|PAID:${qrPaid}|REM:${qrRem}|DUE:${f.dueDate||''}`;
 
   /* ── Instalment schedule rows ── */
   let scheduleRows = '';
@@ -6328,7 +6379,11 @@ function printTransportVoucher(idx, mode){
   // Stable, stored, never index-derived (see getOrAssignTfVoucherNo).
   const voucherNo = getOrAssignTfVoucherNo(t);
   const docNo     = isReceipt ? (t.receipt&&t.receipt!=='-'?t.receipt:voucherNo) : voucherNo;
-  const academicYear = getAcademicYear();
+  // Honour the Settings value (also shown on the Dashboard) and fall back to the
+  // computed year, so every voucher/receipt and the Dashboard print ONE academic
+  // year. Reading getAcademicYear() directly made this slip print a different
+  // year from the instalment voucher whenever the setting was customised.
+  const academicYear = D.settings.academicYear || getAcademicYear();
 
   // Same key vocabulary as the fee voucher's QR (ROLL/AMT/PAID/REM/DUE); the
   // leading TRV: tag is kept so anything already scanning these still works.
@@ -6511,6 +6566,19 @@ function quickCollect(idx){
   if(!f) return;
   const stu=D.students.find(s=>s.roll===f.roll);
   if(!stu){ toast('Student not found'); return; }
+
+  // Instalments must be collected IN ORDER — an earlier instalment left
+  // unpaid while a later one gets collected is exactly how a plan can show
+  // "2/2 paid" with 1/2 still overdue. Block collecting any instalment that
+  // still has an earlier (lower instIdx), unpaid instalment ahead of it.
+  if(f.isInstalment){
+    const planRows=instPlanRows(f);
+    const earlierUnpaid=planRows.find(r=>(r.instIdx??0)<(f.instIdx??0)&&feeComputeStatus(r)!=='Paid');
+    if(earlierUnpaid){
+      toast('⚠️ Collect Instalment '+earlierUnpaid.instPart+' first — instalments must be paid in order');
+      return;
+    }
+  }
 
   // Instalment records go through the proper partial-payment editor (Step 2)
   // instead of this shortcut's old "jump straight to full-paid" path — that
@@ -7014,10 +7082,16 @@ function saveSal(){
   if(!n){toast('Please select an employee');return;}
   // Also link employee's empId via name match
   const linkedEmp=D.employees.find(e=>e.name===n);
-  const basicVal=parseInt($('slb').value)||60000;
-  const allowVal=parseInt($('sla').value)||10000;
+  // Negatives here would corrupt net pay and the payroll expense in the ledger.
+  // Deduction is already capped at gross below; the floor is what was missing.
+  const basicRaw=parseInt($('slb').value), allowRaw=parseInt($('sla').value), deductRaw=parseInt($('sld2').value);
+  if(basicRaw<0){toast('❌ Basic salary cannot be negative');return;}
+  if(allowRaw<0){toast('❌ Allowances cannot be negative');return;}
+  if(deductRaw<0){toast('❌ Deductions cannot be negative');return;}
+  const basicVal=basicRaw||60000;
+  const allowVal=allowRaw||10000;
   const grossVal=basicVal+allowVal;
-  let deductVal=parseInt($('sld2').value)||0;
+  let deductVal=deductRaw||0;
   let deductCapped=false;
   if(deductVal>grossVal){deductVal=grossVal;deductCapped=true;}
   const s={
@@ -7384,6 +7458,7 @@ function saveExp(){
   if(!requirePerm('canEdit','save expense'))return;
   const d=$('xd').value.trim();const a=$('xa').value.trim();
   if(!d||!a){toast('Description and Amount are required');return;}
+  if(isNaN(parseInt(a))||parseInt(a)<0){toast('❌ Expense amount cannot be negative');return;}
   D.expenses.push({
     desc:d,
     cat:$('xc').value,
