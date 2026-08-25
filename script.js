@@ -2465,6 +2465,7 @@ function saveStu(){
   if(!nameVal){setFieldErr('sn','Full Name is required');hasErr=true;}
   if(!rollVal){setFieldErr('sr','Roll Number is required');hasErr=true;}
   if(!feeVal||isNaN(parseInt(feeVal))){setFieldErr('sfa','Valid fee amount is required');hasErr=true;}
+  else if(parseInt(feeVal)<0){setFieldErr('sfa','Fee amount cannot be negative');hasErr=true;}
   if(rollVal){
     const dup=D.students.findIndex(s=>s.roll.toLowerCase()===rollVal.toLowerCase());
     if(dup>=0&&dup!==editIdx){

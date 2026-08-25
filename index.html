@@ -867,8 +867,8 @@
             <div id="st-fee-container"><!-- fee inputs are generated dynamically from D.classes, one per program --></div>
 
             <div class="form-sec" style="font-size:11px;font-weight:700;color:var(--s4);letter-spacing:1px;text-transform:uppercase;padding:8px 0 4px">Late Fee</div>
-            <div class="mf"><label>Late Fee Penalty (%)</label><input type="number" id="st-latepct"></div>
-            <div class="mf"><label>Fee Due Day</label><input type="number" id="st-dueday"></div>
+            <div class="mf"><label>Late Fee Penalty (%)</label><input type="number" id="st-latepct" min="0" max="100" step="0.5"></div>
+            <div class="mf"><label>Fee Due Day</label><input type="number" id="st-dueday" min="1" max="31" step="1"></div>
             <p style="font-size:11px;color:var(--s4);margin:0 0 10px">Applies to <strong>all sections</strong> of each program (Boys &amp; Girls campus). Changing a fee here updates every class of that program — existing paid/pending fee records are not retroactively changed.</p>
             <button class="mo-save" onclick="saveFeeConfigSettings()">Save Changes</button>
           </div>
@@ -1080,7 +1080,7 @@
     </div>
     <div class="form-sec">Fee Information</div>
     <div class="mg">
-      <div class="mf"><label>Fee Amount (Rs) *</label><input id="sfa" type="number" value="25000" oninput="stuFeePreview()"></div>
+      <div class="mf"><label>Fee Amount (Rs) *</label><input id="sfa" type="number" min="0" step="100" value="25000" oninput="stuFeePreview()"></div>
       <div class="mf"><label>Payment Type</label>
         <select id="s-ftype" onchange="onStuFeeTypeChange(this.value)">
           <option value="full">Full Payment (Single Due Date)</option>
@@ -1279,8 +1279,8 @@
       <div class="mf"><label>Status</label>
         <select id="est"><option>Active</option><option>On Leave</option><option>Inactive</option></select>
       </div>
-      <div class="mf"><label>Basic Salary (Rs)</label><input id="es" type="number" value="80000"></div>
-      <div class="mf"><label>Allowances (Rs)</label><input id="ea" type="number" value="15000"></div>
+      <div class="mf"><label>Basic Salary (Rs)</label><input id="es" type="number" min="0" step="500" value="80000"></div>
+      <div class="mf"><label>Allowances (Rs)</label><input id="ea" type="number" min="0" step="500" value="15000"></div>
       <div class="mf"><label>Contact</label><input id="ec" placeholder="0300-0000000"></div>
       <div class="mf"><label>Email</label><input id="ee" type="email" placeholder="email@gct.edu.pk"></div>
     </div>
@@ -1418,7 +1418,7 @@
         </div>
         <div class="mf">
           <label>Total Fee — Before Discount (Rs) *</label>
-          <input id="fa" type="number" value="25000" style="width:100%;padding:10px 13px;border:1.5px solid var(--s2);border-radius:var(--rads);font-size:14px;outline:none;font-family:inherit" oninput="feeUpdateInstalment()">
+          <input id="fa" type="number" min="0" step="100" value="25000" style="width:100%;padding:10px 13px;border:1.5px solid var(--s2);border-radius:var(--rads);font-size:14px;outline:none;font-family:inherit" oninput="feeUpdateInstalment()">
         </div>
         <div class="mf">
           <label>Extra Concession (Rs)</label>
@@ -1564,7 +1564,7 @@
       <div class="mf" id="fn-reason-other-wrap" style="display:none"><label>Specify Reason</label>
         <input id="fn-reason-other" placeholder="e.g. Fighting on campus">
       </div>
-      <div class="mf"><label>Fine Amount (Rs) *</label><input id="fn-amt" type="number" value="500"></div>
+      <div class="mf"><label>Fine Amount (Rs) *</label><input id="fn-amt" type="number" min="0" step="50" value="500"></div>
       <div class="mf"><label>Date *</label><input id="fn-date" type="date"></div>
       <div class="mf"><label>Status</label>
         <select id="fn-status">
@@ -1626,7 +1626,7 @@
       <div class="mf"><label>Fee Title *</label>
         <input id="bf-cat" placeholder="e.g. Lab Fee, Sports Fee, Library Fee">
       </div>
-      <div class="mf"><label>Amount per Student (Rs) *</label><input id="bf-amt" type="number" value="1000"></div>
+      <div class="mf"><label>Amount per Student (Rs) *</label><input id="bf-amt" type="number" min="0" step="100" value="1000"></div>
       <div class="mf"><label>Due Date *</label><input id="bf-due" type="date"></div>
     </div>
 
@@ -1680,7 +1680,7 @@
 
     <div class="mg">
       <div class="mf"><label>Route / Pickup Point</label><input id="tf-route" placeholder="e.g. Model Town → Campus"></div>
-      <div class="mf"><label>Amount (Rs) *</label><input id="tf-amt" type="number" value="2500"></div>
+      <div class="mf"><label>Amount (Rs) *</label><input id="tf-amt" type="number" min="0" step="100" value="2500"></div>
       <div class="mf"><label>Due Date *</label><input id="tf-due" type="date"></div>
       <div class="mf"><label>Status</label>
         <select id="tf-status">
@@ -1770,9 +1770,9 @@
         </select>
       </div>
       <div class="mf"><label>Designation</label><input id="sld" placeholder="Auto-filled from employee"></div>
-      <div class="mf"><label>Basic Salary (Rs) *</label><input id="slb" type="number" value="80000"></div>
-      <div class="mf"><label>Allowances (Rs)</label><input id="sla" type="number" value="15000"></div>
-      <div class="mf"><label>Deductions (Rs)</label><input id="sld2" type="number" value="0" placeholder="e.g. EOBI, tax, loan"></div>
+      <div class="mf"><label>Basic Salary (Rs) *</label><input id="slb" type="number" min="0" step="500" value="80000"></div>
+      <div class="mf"><label>Allowances (Rs)</label><input id="sla" type="number" min="0" step="500" value="15000"></div>
+      <div class="mf"><label>Deductions (Rs)</label><input id="sld2" type="number" min="0" step="100" value="0" placeholder="e.g. EOBI, tax, loan"></div>
       <div class="mf"><label>Month</label><input id="slm" value="April 2025"></div>
       <div class="mf"><label>Payment Method</label><select id="slmt"><option>Bank Transfer</option><option>Cash</option><option>Cheque</option></select></div>
       <div class="mf"><label>Status</label><select id="slst"><option>Paid</option><option>Pending</option></select></div>
@@ -1911,7 +1911,7 @@
     <div class="mg">
       <div class="mf"><label>Description *</label><input id="xd" placeholder="e.g. Lab Equipment purchase"></div>
       <div class="mf"><label>Category</label><select id="xc"></select></div>
-      <div class="mf"><label>Amount (Rs) *</label><input id="xa" type="number" value="5000"></div>
+      <div class="mf"><label>Amount (Rs) *</label><input id="xa" type="number" min="0" step="100" value="5000"></div>
       <div class="mf"><label>Vendor / Payee</label><input id="xv" placeholder="e.g. LESCO, Agha Steel"></div>
       <div class="mf"><label>Approved By</label><input id="xp" placeholder="e.g. Principal"></div>
       <div class="mf"><label>Status</label><select id="xs"><option>Approved</option><option>Pending</option></select></div>
@@ -2024,7 +2024,7 @@
     <div class="mg">
       <div class="mf"><label>Description *</label><input id="mtd" placeholder="e.g. Donation from Alumni Association"></div>
       <div class="mf"><label>Type *</label><select id="mtt"><option>Income</option><option>Expense</option></select></div>
-      <div class="mf"><label>Amount (Rs) *</label><input id="mta" type="number" value="1000"></div>
+      <div class="mf"><label>Amount (Rs) *</label><input id="mta" type="number" min="0" step="100" value="1000"></div>
       <div class="mf"><label>Date</label><input id="mtdt" type="date"></div>
       <div class="mf"><label>Category</label><input id="mtc" placeholder="e.g. Donation, Refund, Adjustment"></div>
     </div>
