@@ -6388,159 +6388,157 @@ function printTransportVoucher(idx, mode){
   // Same key vocabulary as the fee voucher's QR (ROLL/AMT/PAID/REM/DUE); the
   // leading TRV: tag is kept so anything already scanning these still works.
   const qrPayload = `TRV:${docNo}|ROLL:${stu.roll}|AMT:${tfAmt}|PAID:${tfPaid}|REM:${tfRemaining}|DUE:${t.dueDate||''}`;
-  // Generated locally in-browser — see the note in printVoucher() above for why.
 
+  // ── Layout below mirrors printReceipt()'s template 1:1 (header, student+
+  // payment info table, fee-label bar, charge & payment summary table, the
+  // 3-box amount row, notes/payment panel, signature row, footer) so every
+  // printed document in the app reads as one consistent design. Only the
+  // COLOUR (teal, unchanged) and the transport-specific content (route,
+  // "Transport Office", bus icon) differ from the fee receipt.
   const FONT = `-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Arial,sans-serif`;
-  const ink='#0f172a', brand='#0e7490', brandDeep='#0a3d47'; // teal — visually distinct from the main green fee voucher
+  const brand='#0e7490', brandDeep='#0a3d47'; // teal — kept exactly as before, unchanged
   const docTitle = isReceipt ? 'TRANSPORT FEE RECEIPT' : 'TRANSPORT FEE VOUCHER';
+  const docLabel = isReceipt ? 'Transport Fee Receipt' : 'Transport Fee Voucher';
+  const fullyPaid = tfRemaining<=0;
 
-  const genTfCopy = (copyType) => {
-    const stripeClr = copyType==='student' ? brand : '#1d4ed8';
-    const stripeSoft = copyType==='student' ? '#ecfeff' : '#eff6ff';
-    const stampLabel = isReceipt ? 'STUDENT RECEIPT' : (copyType==='student' ? 'STUDENT COPY' : 'OFFICE COPY');
-    const statusBand = isPaid
-      ? `<div style="background:#0d7a4f;color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:700;letter-spacing:.5px">✓ PAID IN FULL — Receipt ${t.receipt&&t.receipt!=='-'?t.receipt:'—'}${t.date&&t.date!=='-'?' — '+t.date:''}</div>`
-      : tfPaid>0
-        ? `<div style="background:#b45309;color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:700;letter-spacing:.5px">◐ PARTIALLY PAID — Rs ${tfRemaining.toLocaleString()} still due${isOverdue?' — OVERDUE':' by '+dueFmt}</div>`
-        : isOverdue
-          ? `<div style="background:#dc2626;color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:700;letter-spacing:.5px">⚠ OVERDUE${diffDays!==null?' — '+Math.abs(diffDays)+' day(s) past due':''} — pay immediately</div>`
-          : `<div style="background:${brand};color:#fff;text-align:center;padding:8px;font-size:11.5px;font-weight:600;letter-spacing:.3px">🚌 Payment due on or before ${dueFmt}</div>`;
+  const infoRow=(l,v)=>`<tr><td style="padding:5px 2px;color:#64748b;font-size:10.5px;width:38%">${l}</td><td style="padding:5px 2px;font-weight:700;color:#0f172a;font-size:11.5px">${v}</td></tr>`;
 
-    return `
-<div class="vch-copy" style="background:#fff;font-family:${FONT};margin-bottom:0;page-break-inside:avoid;border-radius:18px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,.10),0 1px 3px rgba(15,23,42,.08);border:1px solid #eef0f2">
-  <div style="background:linear-gradient(135deg,${brandDeep},${brand});padding:0">
-    <div style="display:flex;align-items:stretch;min-height:88px">
-      <div style="width:76px;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:14px 10px">
-        <div style="width:52px;height:52px;border-radius:16px;background:rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;color:#fff;border:1px solid rgba(255,255,255,.25);overflow:hidden">${getLogoBadgeInner()}</div>
-      </div>
-      <div style="flex:1;padding:16px 14px 14px 4px;display:flex;flex-direction:column;justify-content:center">
-        <div style="font-size:18px;font-weight:800;color:#fff;letter-spacing:-.2px;line-height:1.15">${D.settings.instName||''}</div>
-        <div style="font-size:10.5px;color:rgba(255,255,255,.65);margin-top:3px;font-weight:500">${D.settings.city||''} · Transport Office · AY ${academicYear}</div>
-        <div style="margin-top:9px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          <span style="background:rgba(255,255,255,.16);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:4px 12px;border-radius:20px">🚌 ${docTitle}</span>
-          ${vchStatusBadge(tfStatus,{size:9.5,pad:'3px 10px',radius:'20px'})}
-        </div>
-      </div>
-      <div style="width:120px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px 10px">
-        <div style="background:rgba(255,255,255,.12);border-radius:10px;padding:5px 10px;text-align:center;width:100%">
-          <div style="font-size:7.5px;color:rgba(255,255,255,.6);letter-spacing:1px;text-transform:uppercase;font-weight:600">${isReceipt?'Receipt No.':'Voucher No.'}</div>
-          <div style="font-size:12px;font-weight:800;color:#fff;margin-top:1px">${docNo}</div>
-        </div>
-        <div class="qr-slot" data-qr="${qrPayload}" style="width:52px;height:52px;background:#fff;padding:3px;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
-        <div style="background:rgba(255,255,255,.9);color:${stripeClr};font-size:8px;font-weight:800;letter-spacing:1px;padding:3px 9px;text-transform:uppercase;border-radius:20px">${stampLabel}</div>
-      </div>
-    </div>
-  </div>
-  ${statusBand}
-  <div style="padding:18px 20px">
-    <div style="background:#f8fafc;border-radius:12px;padding:14px 16px;margin-bottom:16px">
-      <div style="font-size:9.5px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${stripeClr};margin-bottom:10px">Student Information</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 20px">
-        <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">STUDENT NAME</div><div style="font-size:14px;font-weight:700;color:${ink}">${stu.name}</div></div>
-        <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">FATHER'S NAME</div><div style="font-size:12.5px;color:#334155">${stu.father||'—'}</div></div>
-        <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">ROLL NUMBER</div><div style="font-size:12.5px;font-weight:700;color:${stripeClr}">${stu.roll}</div></div>
-        <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">STUDENT ID</div><div style="font-size:12px;color:#334155">${stu.id||'—'}</div></div>
-        <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">PROGRAM</div><div style="font-size:12px;color:#334155">${(stu.cls||'—').replace('Inter-','')} · ${stu.dept||'—'}</div></div>
-        <div><div style="font-size:9px;color:#94a3b8;font-weight:600;margin-bottom:2px">SEMESTER / SECTION</div><div style="font-size:12px;color:#334155">${stu.sem||'—'} · ${stu.section||'—'}</div></div>
-      </div>
-    </div>
-
-    <div style="background:${stripeSoft};border-radius:12px;padding:14px 16px;margin-bottom:16px">
-      <div style="font-size:9.5px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${stripeClr};margin-bottom:10px">Route Details</div>
-      <div style="font-size:13px;font-weight:600;color:${ink}">🚌 ${t.route||'Route not specified'}</div>
-      <div style="font-size:10px;color:#64748b;margin-top:6px">Issued ${todayFmt} · Due ${dueFmt}${diffDays!==null&&diffDays>=0&&!isPaid?' · '+diffDays+' day(s) remaining':''}${isReceipt&&t.date&&t.date!=='-'?' · Received '+t.date+(t.method&&t.method!=='-'?' ('+t.method+')':''):''}</div>
-    </div>
-
-    <!-- AMOUNT BOX — Transport Fee / Paid / Remaining, all three always printed
-         (Rs 0 included), same structure as the main fee voucher's amount box. -->
-    <div style="border-radius:14px;overflow:hidden;margin-bottom:14px;background:linear-gradient(135deg,${brandDeep},${brand})">
-      <div style="padding:8px 16px"><div style="font-size:9.5px;font-weight:700;color:rgba(255,255,255,.8);letter-spacing:1px;text-transform:uppercase">${isReceipt?'Transport Fee — Amount Received':'Transport Fee — Amount Due'}</div></div>
-      <div style="display:flex;align-items:center;padding:6px 16px 16px;gap:16px">
-        <div style="flex:1">
-          <div style="font-size:32px;font-weight:800;color:#fff;line-height:1;letter-spacing:-.5px">Rs ${headlineAmt.toLocaleString()}</div>
-          <div style="font-size:10px;color:rgba(255,255,255,.65);margin-top:5px">${amountInWords(headlineAmt)}</div>
-        </div>
-        <div style="text-align:center">
-          <div style="background:rgba(255,255,255,.14);border-radius:8px;padding:7px 14px;margin-bottom:5px">
-            <div style="font-size:11px;font-weight:800;letter-spacing:2px;color:#fff">${feeStatusLabel(tfStatus)}</div>
-          </div>
-          <div style="font-size:8px;color:rgba(255,255,255,.5);font-weight:600;text-transform:uppercase;letter-spacing:.5px">Office Stamp</div>
-        </div>
-      </div>
-      <div style="display:flex;gap:1px;background:rgba(255,255,255,.15)">
-        <div style="flex:1;padding:7px 16px">
-          <div style="font-size:8px;color:rgba(255,255,255,.6);font-weight:700;letter-spacing:.8px;text-transform:uppercase">Transport Fee</div>
-          <div style="font-size:13px;font-weight:800;color:#fff;margin-top:1px">Rs ${tfAmt.toLocaleString()}</div>
-        </div>
-        <div style="flex:1;padding:7px 16px">
-          <div style="font-size:8px;color:rgba(255,255,255,.6);font-weight:700;letter-spacing:.8px;text-transform:uppercase">Paid Amount</div>
-          <div style="font-size:13px;font-weight:800;color:#bbf7d0;margin-top:1px">Rs ${tfPaid.toLocaleString()}</div>
-        </div>
-        <div style="flex:1;padding:7px 16px">
-          <div style="font-size:8px;color:rgba(255,255,255,.6);font-weight:700;letter-spacing:.8px;text-transform:uppercase">Remaining Amount</div>
-          <div style="font-size:13px;font-weight:800;color:${tfRemaining>0?'#fecaca':'#bbf7d0'};margin-top:1px">Rs ${tfRemaining.toLocaleString()}</div>
-        </div>
-      </div>
-    </div>
-
-    <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
-      <div style="flex:1;min-width:220px;background:#f8fafc;border-radius:12px;padding:12px 14px">
-        <div style="font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${stripeClr};margin-bottom:8px">${isReceipt?'Notes':'Payment Instructions'}</div>
-        <div style="font-size:10.5px;color:#475569;line-height:1.9">
-          ${isReceipt
-            ? `Received with thanks against the transport fee shown above.<br>
-               Retain this receipt as <strong>proof of payment</strong>.<br>
-               Fee once paid is non-refundable and non-transferable.<br>`
-            : `Pay <strong>on or before</strong> the due date at the <strong>College Accounts / Transport Office</strong>.<br>
-               Cashier will stamp and sign — <strong>retain your copy as proof.</strong><br>
-               Bus service may be suspended if the fee stays unpaid past the due date.<br>`}
-          Queries: <strong>${D.settings.accountsPhone||D.settings.contact||'—'}</strong>${D.settings.officeHours?' · Office hours '+D.settings.officeHours:''}
-        </div>
-      </div>
-      ${vchBankBlock(stripeClr,stripeSoft)}
-    </div>
-
-    ${vchSignatureRow('Student / Parent Signature','Transport Officer / Cashier')}
-
-    ${vchFooter((isReceipt?'Receipt ':'Voucher ')+docNo,D.settings.instName||'')}
-  </div>
-</div>`;
-  };
-
-  const css = `
+  const h=`<!DOCTYPE html><html><head><meta charset="UTF-8">
+  <title>${docLabel} — ${stu.name}${docNo?' — '+docNo:''}</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>
+  <style>
     *{box-sizing:border-box;margin:0;padding:0;}
-    html{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
-    body{font-family:Arial,sans-serif;background:#e8ecef;padding:16px;}
-    .no-print{margin-bottom:20px;display:flex;align-items:center;gap:10px;background:#fff;padding:14px 18px;border-radius:8px;border:1px solid #d1d5db;box-shadow:0 2px 8px rgba(0,0,0,.08);flex-wrap:wrap;}
-    .no-print-left{flex:1;min-width:0}
-    .no-print h3{font-size:15px;font-weight:800;color:${brandDeep};margin-bottom:3px}
-    .no-print p{font-size:11px;color:#6b7280}
-    .btn-row{display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0}
-    .nbtn{padding:9px 18px;border:none;border-radius:6px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit}
-    .cut-line{display:flex;align-items:center;gap:10px;margin:16px 0;color:#9ca3af;font-size:10.5px;font-family:Arial,sans-serif}
-    .cut-line::before,.cut-line::after{content:'';flex:1;border-top:1.5px dashed #cbd5e1}
+    body{font-family:${FONT};background:#ccc;padding:20px;color:#0f172a;}
+    .no-print-bar{max-width:800px;margin:0 auto 14px;background:#111;border-radius:8px;padding:12px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;}
+    .npb-txt h4{font-size:13px;font-weight:700;color:#fff;}
+    .npb-txt p{font-size:10.5px;color:#bbb;margin-top:2px;}
+    .prt-btn{padding:9px 20px;border:none;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:#111;}
+    .sheet{max-width:800px;margin:0 auto;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,.10);border:1px solid #eef0f2;}
+    /* Shared print rules — same @page, same hidden toolbar, same
+       don't-split-a-card behaviour as every other voucher/receipt. */
     ${vchPrintCss('A4')}
     @media print{
-      .vch-copy{box-shadow:none!important;border-radius:0!important;border:none!important;}
-    }`;
+      .sheet{box-shadow:none!important;border-radius:0!important;border:none!important;max-width:none!important;}
+    }
+  </style></head><body>
+  <div class="no-print-bar">
+    <div class="npb-txt"><h4>🚌 ${docLabel} — ${stu.name}</h4><p>${isReceipt?'Receipt':'Voucher'} No. ${docNo||'—'} &nbsp;·&nbsp; ${isReceipt?'Amount Received':'Amount Due'}: Rs ${headlineAmt.toLocaleString()}</p></div>
+    <button class="prt-btn" onclick="window.print()">🖨️ Print</button>
+  </div>
+  <div class="sheet">
 
-  const docLabel = isReceipt ? 'Transport Fee Receipt' : 'Transport Fee Voucher';
-  const h = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${docLabel} — ${stu.name} — ${docNo}</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><style>${css}</style></head><body>
-  <div class="no-print">
-    <div class="no-print-left">
-      <h3>🚌 ${docLabel} — ${stu.name}</h3>
-      <p>${docNo} &nbsp;·&nbsp; Route: ${t.route||'—'} &nbsp;·&nbsp; Due: ${dueFmt} &nbsp;·&nbsp; Fee: <strong>Rs ${tfAmt.toLocaleString()}</strong> &nbsp;·&nbsp; Paid: <strong>Rs ${tfPaid.toLocaleString()}</strong> &nbsp;·&nbsp; Remaining: <strong>Rs ${tfRemaining.toLocaleString()}</strong> &nbsp;·&nbsp; ${feeStatusLabel(tfStatus)}</p>
+    <!-- HEADER -->
+    <div style="background:linear-gradient(135deg,${brandDeep},${brand});padding:0">
+      <div style="display:flex;align-items:stretch;min-height:92px">
+        <div style="width:76px;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:14px 10px">
+          <div style="width:52px;height:52px;border-radius:16px;background:rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;color:#fff;border:1px solid rgba(255,255,255,.25);overflow:hidden">${getLogoBadgeInner()}</div>
+        </div>
+        <div style="flex:1;padding:16px 14px 14px 4px;display:flex;flex-direction:column;justify-content:center">
+          <div style="font-size:19px;font-weight:800;color:#fff;letter-spacing:-.2px;line-height:1.15">${D.settings.instName||''}</div>
+          <div style="font-size:10.5px;color:rgba(255,255,255,.65);margin-top:3px;font-weight:500">${D.settings.city||''} · Transport Office · AY ${academicYear}</div>
+          <div style="margin-top:9px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span style="background:rgba(255,255,255,.16);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.5px;padding:4px 12px;border-radius:20px">🚌 ${docTitle}</span>
+            ${vchStatusBadge(tfStatus,{size:9.5,pad:'3px 10px',radius:'20px'})}
+          </div>
+        </div>
+        <div style="width:120px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px 10px">
+          <div style="background:rgba(255,255,255,.12);border-radius:10px;padding:5px 10px;text-align:center;width:100%">
+            <div style="font-size:7.5px;color:rgba(255,255,255,.6);letter-spacing:1px;text-transform:uppercase;font-weight:600">${isReceipt?'Receipt No.':'Voucher No.'}</div>
+            <div style="font-size:12px;font-weight:800;color:#fff;margin-top:1px">${docNo||'—'}</div>
+          </div>
+          <div class="qr-slot" data-qr="${qrPayload}" style="width:52px;height:52px;background:#fff;padding:3px;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
+        </div>
+      </div>
     </div>
-    <div class="btn-row">
-      <button class="nbtn" style="background:${brandDeep};color:#fff" onclick="window.print()">🖨️ ${isReceipt?'Print Receipt':'Print Both Copies'}</button>
-      <button class="nbtn" style="background:#1d4ed8;color:#fff" onclick="window.print()" title="Choose Save as PDF in print dialog">⬇️ Save as PDF</button>
+
+    <div style="padding:22px 26px 26px">
+      <!-- STUDENT + PAYMENT INFO -->
+      <table style="width:100%;border-collapse:collapse;margin-bottom:14px">
+        <tr>
+          <td style="width:50%;vertical-align:top;padding-right:14px">
+            <table style="width:100%;border-collapse:collapse">
+              ${infoRow('Student Name',stu.name)}
+              ${infoRow('Roll No.',stu.roll)}
+              ${infoRow("Father's Name",stu.father||'—')}
+              ${infoRow('Class / Section',(stu.cls||'—')+(stu.section?' ('+stu.section+')':''))}
+            </table>
+          </td>
+          <td style="width:50%;vertical-align:top">
+            <table style="width:100%;border-collapse:collapse">
+              ${infoRow(isReceipt?'Date Received':'Issue Date',(isReceipt&&t.date&&t.date!=='-')?t.date:todayFmt)}
+              ${infoRow('Payment Method',(t.method&&t.method!=='-')?t.method:'—')}
+              ${infoRow('Semester / Year',stu.sem||'—')}
+              ${infoRow('Route',t.route||'—')}
+            </table>
+          </td>
+        </tr>
+      </table>
+
+      <div style="font-size:10px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:${brand};border-top:2px solid #eef0f2;border-bottom:2px solid #eef0f2;padding:8px 0;margin-bottom:14px">Transport Fee — AY ${academicYear}</div>
+
+      <!-- CHARGE & PAYMENT SUMMARY -->
+      <table style="width:100%;border-collapse:collapse;margin-bottom:16px;font-size:11px">
+        <thead><tr style="background:#f8fafc">
+          <th style="padding:6px 8px;border:1px solid #e2e8f0;font-size:9px;text-transform:uppercase;color:#64748b;text-align:left;width:62%">This Fee — Charge &amp; Payment Summary</th>
+          <th style="padding:6px 8px;border:1px solid #e2e8f0;font-size:9px;text-transform:uppercase;color:#64748b;text-align:right">Amount (Rs)</th>
+        </tr></thead>
+        <tbody>
+          <tr><td style="padding:5px 8px;border:1px solid #e2e8f0;font-weight:700;color:#0f172a">Transport Fee</td><td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:800">${tfAmt.toLocaleString()}</td></tr>
+          <tr><td style="padding:5px 8px;border:1px solid #e2e8f0;color:#15803d">✔ Received to date</td><td style="padding:5px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${tfPaid.toLocaleString()}</td></tr>
+          <tr><td style="padding:6px 8px;border:1px solid #e2e8f0;font-weight:800;color:${tfRemaining>0?'#b91c1c':'#065f46'}">${tfRemaining>0?'Balance still due':'Balance — fully settled'}</td><td style="padding:6px 8px;border:1px solid #e2e8f0;text-align:right;font-weight:800;color:${tfRemaining>0?'#b91c1c':'#065f46'}">${tfRemaining.toLocaleString()}</td></tr>
+        </tbody>
+      </table>
+
+      <!-- AMOUNT RECEIVED/DUE / TOTAL / REMAINING CALLOUT -->
+      <div style="display:flex;gap:10px;margin-bottom:16px" class="avoid-break">
+        <div style="flex:1;background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:12px;padding:14px 16px">
+          <div style="font-size:9.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#065f46">${isReceipt?'Amount Received (This Payment)':'Amount Due'}</div>
+          <div style="font-size:23px;font-weight:800;color:#065f46;margin-top:4px">Rs ${headlineAmt.toLocaleString()}</div>
+          <div style="font-size:9.5px;color:#166534;margin-top:3px;font-style:italic">${amountInWords(headlineAmt)}</div>
+        </div>
+        <div style="flex:0 0 27%;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:12px;padding:14px 16px">
+          <div style="font-size:9.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#475569">Total Paid Amount</div>
+          <div style="font-size:23px;font-weight:800;color:#0f172a;margin-top:4px">Rs ${tfPaid.toLocaleString()}</div>
+          <div style="font-size:9.5px;color:#64748b;margin-top:3px">of Rs ${tfAmt.toLocaleString()} payable</div>
+        </div>
+        <div style="flex:0 0 27%;background:${fullyPaid?'#f0fdf4':'#fef2f2'};border:1.5px solid ${fullyPaid?'#bbf7d0':'#fecaca'};border-radius:12px;padding:14px 16px">
+          <div style="font-size:9.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${fullyPaid?'#065f46':'#b91c1c'}">Remaining Amount</div>
+          <div style="font-size:23px;font-weight:800;color:${fullyPaid?'#065f46':'#b91c1c'};margin-top:4px">Rs ${tfRemaining.toLocaleString()}</div>
+          <div style="margin-top:5px">${vchStatusBadge(tfStatus,{size:9,pad:'2px 8px'})}</div>
+        </div>
+      </div>
+
+      <div style="background:#f8fafc;border-radius:12px;padding:14px 16px;margin-bottom:16px" class="avoid-break">
+        <div style="font-size:9.5px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${brand};margin-bottom:8px">Route Details</div>
+        <div style="font-size:13px;font-weight:600;color:#0f172a">🚌 ${t.route||'Route not specified'}</div>
+        <div style="font-size:10px;color:#64748b;margin-top:6px">Issued ${todayFmt} · Due ${dueFmt}${diffDays!==null&&diffDays>=0&&!isPaid?' · '+diffDays+' day(s) remaining':''}${isOverdue?' · OVERDUE':''}</div>
+      </div>
+
+      <!-- HOW TO PAY THE BALANCE — only when something is still owed. -->
+      ${tfRemaining>0?`
+      <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap" class="avoid-break">
+        <div style="flex:1;min-width:220px;background:#f8fafc;border-radius:12px;padding:12px 14px">
+          <div style="font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${brand};margin-bottom:8px">Paying the Balance</div>
+          <div style="font-size:10.5px;color:#475569;line-height:1.9">
+            <strong>Rs ${tfRemaining.toLocaleString()}</strong> is still outstanding.<br>
+            Due by: <strong>${dueFmt}</strong>.<br>
+            Deposit at the <strong>College Accounts / Transport Office</strong> or via the channels alongside.<br>
+            Bus service may be suspended if the fee stays unpaid past the due date.<br>
+            Queries: <strong>${D.settings.accountsPhone||D.settings.contact||'—'}</strong>${D.settings.officeHours?' · Office hours '+D.settings.officeHours:''}
+          </div>
+        </div>
+        ${vchBankBlock(brand,'#ecfeff')}
+      </div>`:''}
+
+      <!-- SIGNATURES + SEAL — same block as the fee/instalment vouchers -->
+      <div style="margin-top:26px" class="avoid-break">${vchSignatureRow('Student / Parent Signature','Transport Officer / Cashier')}</div>
+
+      <div style="margin-top:16px;font-size:8.5px;color:#94a3b8;line-height:1.6;border-top:1px solid #eef0f2;padding-top:10px">
+        This is a computer-generated ${isReceipt?'receipt issued against the amount received above':'voucher issued against the transport fee due above'}. Please retain it as proof of ${isReceipt?'payment':'the amount due'}. Fee once paid is non-refundable and non-transferable. Scan the QR code above to verify this ${isReceipt?'receipt':'voucher'} online.
+      </div>
+      ${vchFooter((isReceipt?'Receipt ':'Voucher ')+(docNo||''),D.settings.instName||'')}
     </div>
   </div>
-  ${isReceipt
-    ? genTfCopy('student')
-    : `${genTfCopy('student')}
-  <div class="cut-line"><span>✂ cut here — Office Copy below ✂</span></div>
-  ${genTfCopy('office')}`}
   <script>
     (function renderQrSlots(attemptsLeft){
       if (typeof QRCode === 'undefined') {
@@ -6550,10 +6548,10 @@ function printTransportVoucher(idx, mode){
       document.querySelectorAll('.qr-slot').forEach(function(el){
         if (el.dataset.rendered) return;
         el.dataset.rendered = '1';
-        new QRCode(el, { text: el.dataset.qr, width: 52, height: 52, colorDark: '#0a3d47', colorLight: '#ffffff' });
+        new QRCode(el, { text: el.dataset.qr, width: 46, height: 46, colorDark: '#000000', colorLight: '#ffffff' });
       });
     })(25);
-  </script>
+  <\/script>
   </body></html>`;
 
   showPrintPreview(h, docLabel + ' — ' + stu.name);
