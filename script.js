@@ -4289,10 +4289,11 @@ function saveFee(){
   // silently overwriting the previous one.
   if(isEdit && D.fees[editIdx] && D.fees[editIdx].isInstalment){
     const f=D.fees[editIdx];
-    // Final server-side-style guard: instalments must be paid in order, even
-    // if the disabled-field UI lock was somehow bypassed.
-    const earlierUnpaidSave=instPlanRows(f).find(r=>(r.instIdx??0)<(f.instIdx??0)&&feeComputeStatus(r)!=='Paid');
-    if(earlierUnpaidSave){toast('⚠️ Collect Instalment '+earlierUnpaidSave.instPart+' first — instalments must be paid in order');return;}
+    // Final server-side-style guard: instalments must be paid in DUE-DATE
+    // order (not creation order), even if the disabled-field UI lock was
+    // somehow bypassed.
+    const earlierUnpaidSave=instEarlierUnpaid(instPlanRows(f),f);
+    if(earlierUnpaidSave){toast('⚠️ Collect the '+(earlierUnpaidSave.dueDate?'Rs '+fmt(earlierUnpaidSave.amt)+' instalment due '+earlierUnpaidSave.dueDate:'Instalment '+earlierUnpaidSave.instPart)+' first — instalments must be paid in due-date order');return;}
     const already=feePaidAmt(f);
     let payNow=parseInt(($('fPayNow')||{}).value)||0;
     payNow=Math.max(0,Math.min(payNow, f.amt-already)); // never allow paid > payable
@@ -4767,16 +4768,17 @@ function openEditFee(idx){
     // e.g. after opening the record just to view/print a voucher — silently
     // recorded the whole instalment as paid even though nothing was collected.
     $('fPayNow').value='';
-    // Instalments must be collected IN ORDER. If an earlier instalment in this
-    // plan is still unpaid, lock the payment field here too — this modal is
-    // reachable directly via the row's "Edit" button, not just quickCollect(),
-    // so the order guard has to live here as well, not only in quickCollect().
+    // Instalments must be collected in DUE-DATE order. If an earlier-due
+    // instalment in this plan is still unpaid, lock the payment field here
+    // too — this modal is reachable directly via the row's "Edit" button,
+    // not just quickCollect(), so the order guard has to live here as well,
+    // not only in quickCollect().
     const planRowsEdit=instPlanRows(f);
-    const earlierUnpaidEdit=planRowsEdit.find(r=>(r.instIdx??0)<(f.instIdx??0)&&feeComputeStatus(r)!=='Paid');
+    const earlierUnpaidEdit=instEarlierUnpaid(planRowsEdit,f);
     if($('fPayNow')) $('fPayNow').disabled=!!earlierUnpaidEdit;
     if(earlierUnpaidEdit){
       const box=$('fPay-preview');
-      if(box){ box.style.color='var(--rd)'; box.textContent='⚠️ Collect Instalment '+earlierUnpaidEdit.instPart+' first — instalments must be paid in order.'; }
+      if(box){ box.style.color='var(--rd)'; box.textContent='⚠️ Collect the '+(earlierUnpaidEdit.dueDate?'instalment due '+earlierUnpaidEdit.dueDate:'Instalment '+earlierUnpaidEdit.instPart)+' first — instalments must be paid in due-date order.'; }
     }
     feePreviewPartial(); // fills Already Paid / Total Payable / preview + cap
     $('fst').value=feeComputeStatus(f)==='Paid'?'Paid':'Pending'; // kept in sync for saveFee's isEdit branch, but not shown
@@ -5123,10 +5125,12 @@ function printInstalmentVouchers(roll, planKey, mode){
     const isPaid=status==='Paid';
 
     // ── "Instalment X of Y" and "Previously Paid" are DERIVED, never stored ──
-    // `plan.rows` is already sorted by instIdx (see instPlanRows), so this row's
-    // ordinal is its position in that plan and "previously paid" is the money
-    // received against every instalment that comes BEFORE it. Nothing here is a
-    // literal: a 2-part plan says "1 of 2", a 6-part plan says "1 of 6".
+    // `plan.rows` is already sorted by payment priority — due date, then
+    // instIdx tiebreak (see instPlanRows) — so this row's ordinal is its
+    // position in that plan and "previously paid" is the money received
+    // against every instalment that comes BEFORE it in due-date order.
+    // Nothing here is a literal: a 2-part plan says "1 of 2", a 6-part plan
+    // says "1 of 6".
     const seat=plan.rows.indexOf(f);
     const ordinal=(seat>=0?seat:0)+1;
     const ofTotal=plan.rows.length;
@@ -6330,13 +6334,15 @@ function printVoucher(idx){
     const stripeSoft = copyType==='student' ? (isInstalment?'#eef2ff':'#ecfdf5') : copyType==='office' ? '#eff6ff' : '#f5f3ff';
     return `
 <div class="col">
-  <!-- HEADER -->
+  <!-- HEADER — logo, institute name, and QR together at the top so the
+       scan target is immediately visible instead of buried mid-column. -->
   <div style="display:flex;align-items:center;gap:7px;border-bottom:2px solid ${brand};padding-bottom:7px;margin-bottom:9px">
     <div style="width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,${brandDeep},${brand});display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#fff;flex-shrink:0;overflow:hidden">${getLogoBadgeInner()}</div>
     <div style="min-width:0;flex:1">
       <div style="font-size:11.5px;font-weight:800;color:${brandDeep};line-height:1.2">${D.settings.instName||''}</div>
       <div style="font-size:7px;color:#64748b">${D.settings.city||''} · AY ${academicYear}</div>
     </div>
+    <div class="qr-slot" data-qr="${qrPayload}" style="width:34px;height:34px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
   </div>
   <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:10px;flex-wrap:wrap">
     <span style="background:${stripeSoft};color:${stripeClr};font-size:7.5px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:10px;text-transform:uppercase">${copyLabel}</span>
@@ -6371,11 +6377,6 @@ function printVoucher(idx){
   </table>
 
   <div style="font-size:7.5px;color:#64748b;margin-bottom:9px">Issued ${todayFmt} · Due <strong style="color:${isOverdue?'#b91c1c':'#0f172a'}">${dueFmt}</strong> · Expires ${expiryFmt}</div>
-
-  <!-- QR -->
-  <div style="text-align:center;margin-bottom:9px">
-    <div class="qr-slot" data-qr="${qrPayload}" style="width:44px;height:44px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin:0 auto;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
-  </div>
 
   <!-- PAYMENT INSTRUCTIONS -->
   <div style="background:#f8fafc;border-radius:8px;padding:8px 9px;margin-bottom:9px">
@@ -6595,6 +6596,7 @@ function printTransportVoucher(idx, mode){
       <div style="font-size:11.5px;font-weight:800;color:${brandDeep};line-height:1.2">${D.settings.instName||''}</div>
       <div style="font-size:7px;color:#64748b">${D.settings.city||''} · AY ${academicYear}</div>
     </div>
+    <div class="qr-slot" data-qr="${qrPayload}" style="width:34px;height:34px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
   </div>
   <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:10px;flex-wrap:wrap">
     <span style="background:${stripeSoft};color:${stripeClr};font-size:7.5px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:10px;text-transform:uppercase">${copyLabel}</span>
@@ -6629,10 +6631,6 @@ function printTransportVoucher(idx, mode){
   </table>
 
   <div style="font-size:7.5px;color:#64748b;margin-bottom:9px">Issued ${todayFmt} · Due <strong style="color:${isOverdue?'#b91c1c':'#0f172a'}">${dueFmt}</strong></div>
-
-  <div style="text-align:center;margin-bottom:9px">
-    <div class="qr-slot" data-qr="${qrPayload}" style="width:44px;height:44px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin:0 auto;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
-  </div>
 
   <div style="background:#f8fafc;border-radius:8px;padding:8px 9px;margin-bottom:9px">
     <div style="font-size:7px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${stripeClr};margin-bottom:4px">Payment Instructions</div>
@@ -6895,15 +6893,18 @@ function quickCollect(idx){
   const stu=D.students.find(s=>s.roll===f.roll);
   if(!stu){ toast('Student not found'); return; }
 
-  // Instalments must be collected IN ORDER — an earlier instalment left
-  // unpaid while a later one gets collected is exactly how a plan can show
-  // "2/2 paid" with 1/2 still overdue. Block collecting any instalment that
-  // still has an earlier (lower instIdx), unpaid instalment ahead of it.
+  // Instalments must be collected in DUE-DATE order — an earlier-due
+  // instalment left unpaid while a later one gets collected is exactly how
+  // a plan can show "2/2 paid" with 1/2 still overdue. Block collecting any
+  // instalment that still has an earlier-due (or same-date, lower instIdx),
+  // unpaid instalment ahead of it. Editing a due date re-ranks this
+  // automatically since instPlanRows/instEarlierUnpaid always read the
+  // current dueDate, never a cached order.
   if(f.isInstalment){
     const planRows=instPlanRows(f);
-    const earlierUnpaid=planRows.find(r=>(r.instIdx??0)<(f.instIdx??0)&&feeComputeStatus(r)!=='Paid');
+    const earlierUnpaid=instEarlierUnpaid(planRows,f);
     if(earlierUnpaid){
-      toast('⚠️ Collect Instalment '+earlierUnpaid.instPart+' first — instalments must be paid in order');
+      toast('⚠️ Collect the '+(earlierUnpaid.dueDate?'instalment due '+earlierUnpaid.dueDate:'Instalment '+earlierUnpaid.instPart)+' first — instalments must be paid in due-date order');
       return;
     }
   }
@@ -10165,10 +10166,37 @@ function instPlanKey(f){
 function sameInstPlan(a,b){
   return a.roll===b.roll && instPlanKey(a)===instPlanKey(b);
 }
-// All instalment rows belonging to the same plan as fee record `f`.
+// ── Payment-priority ordering ─────────────────────────────────────────
+// Instalments are collected in DUE-DATE order, not creation order. Earlier
+// due date always has priority; when two instalments share the same due
+// date, the lower instIdx (the one created first) breaks the tie. This is
+// the single source of truth for "which instalment comes first" — plan
+// display, voucher ordinals AND the payment-order guard all read from it —
+// so editing a due date automatically re-ranks priority everywhere at once.
+// A missing/unparseable due date sorts last (Infinity): we can't tell where
+// it belongs, so it never jumps ahead of instalments that do have one.
+function instDueTime(f){
+  const t=f&&f.dueDate?parseDate(f.dueDate).getTime():NaN;
+  return isFinite(t)?t:Infinity;
+}
+function instPayPriorityCmp(a,b){
+  const d=instDueTime(a)-instDueTime(b);
+  if(d!==0) return d;
+  return (a.instIdx??0)-(b.instIdx??0);
+}
+// All instalment rows belonging to the same plan as fee record `f`,
+// ordered by payment priority (due date, then instIdx tiebreak).
 function instPlanRows(f){
   return D.fees.filter(x=>x.isInstalment&&sameInstPlan(x,f))
-    .sort((a,b)=>(a.instIdx??0)-(b.instIdx??0));
+    .sort(instPayPriorityCmp);
+}
+// The instalment (if any) that must be cleared before `f` can be paid:
+// any OTHER row in the same plan that has payment priority ahead of `f`
+// (earlier due date, or same due date + lower instIdx) and is not yet
+// fully cleared (remaining_amount > 0 — Pending, Overdue, or Partial all
+// count). Returns undefined when `f` is next in line or already paid.
+function instEarlierUnpaid(planRows,f){
+  return planRows.find(r=>r!==f&&instPayPriorityCmp(r,f)<0&&feeComputeStatus(r)!=='Paid');
 }
 function instPlanSummary(f){
   const rows=instPlanRows(f);
