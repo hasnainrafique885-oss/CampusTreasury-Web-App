@@ -5203,11 +5203,11 @@ function printInstalmentVouchers(roll, planKey, mode){
       <div class="iv-divider"></div>
       <div class="iv-bank">
         <div class="iv-bank-h">Bank / Payment Details</div>
-        ${infoRow('Bank',D.settings.bankName)}
-        ${infoRow('Branch',D.settings.bankBranch)}
-        ${infoRow('Account Title',D.settings.bankAccountTitle||D.settings.instName)}
-        ${infoRow('Account No.',D.settings.bankAccountNo)}
-        ${infoRow('IBAN',D.settings.bankIBAN)}
+        ${D.settings.bankName?infoRow('Bank',D.settings.bankName):''}
+        ${D.settings.bankBranch?infoRow('Branch',D.settings.bankBranch):''}
+        ${(D.settings.bankAccountTitle||D.settings.instName)?infoRow('Account Title',D.settings.bankAccountTitle||D.settings.instName):''}
+        ${D.settings.bankAccountNo?infoRow('Account No.',D.settings.bankAccountNo):''}
+        ${D.settings.bankIBAN?infoRow('IBAN',D.settings.bankIBAN):''}
         ${D.settings.bankJazzCash?infoRow('JazzCash',D.settings.bankJazzCash):''}
         ${D.settings.bankEasyPaisa?infoRow('EasyPaisa',D.settings.bankEasyPaisa):''}
       </div>
@@ -5265,65 +5265,73 @@ function printInstalmentVouchers(roll, planKey, mode){
        never a fixed "4" — so a 2-instalment plan shows 2 cards side by
        side and a 3-instalment plan shows 3, instead of always reserving
        4 slots. */
-    .iv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;}
-    .iv-card{position:relative;background:#fff;border:2px solid #000;padding:14px 16px;font-size:10px;overflow:hidden;}
-    .iv-stamp{position:absolute;top:60px;right:18px;border:3px solid #16a34a;color:#16a34a;font-weight:900;font-size:22px;letter-spacing:3px;padding:2px 14px;transform:rotate(-18deg);opacity:.65;font-family:Arial,sans-serif;}
-    .iv-hdr{display:flex;align-items:center;gap:8px;}
-    .iv-logo{width:36px;height:36px;border:1px solid #000;border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;font-family:Arial,sans-serif;flex-shrink:0;overflow:hidden;}
+    .iv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;}
+    .iv-card{position:relative;background:#fff;border:2px solid #000;padding:9px 11px;font-size:8.5px;overflow:hidden;}
+    .iv-stamp{position:absolute;top:48px;right:14px;border:3px solid #16a34a;color:#16a34a;font-weight:900;font-size:18px;letter-spacing:2px;padding:1px 10px;transform:rotate(-18deg);opacity:.65;font-family:Arial,sans-serif;}
+    .iv-hdr{display:flex;align-items:center;gap:6px;position:relative;z-index:3;}
+    .iv-logo{width:28px;height:28px;border:1px solid #000;border-radius:5px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:10px;font-family:Arial,sans-serif;flex-shrink:0;overflow:hidden;}
     .iv-hdr-txt{flex:1;}
-    .iv-inst-name{font-size:13px;font-weight:800;font-family:Arial,sans-serif;}
-    .iv-inst-sub{font-size:8.5px;color:#333;font-family:Arial,sans-serif;}
-    .qr-slot{width:34px;height:34px;flex-shrink:0;}
-    .iv-title{text-align:center;font-size:16px;font-weight:800;margin:8px 0 4px;}
+    .iv-inst-name{font-size:11px;font-weight:800;font-family:Arial,sans-serif;line-height:1.2;}
+    .iv-inst-sub{font-size:7px;color:#333;font-family:Arial,sans-serif;}
+    /* Boxed, white background and its own stacking order so the diagonal
+       "PAID" stamp (position:absolute, painted above static content) can
+       never visually cut across or blend into the QR code underneath it. */
+    .qr-slot{width:28px;height:28px;flex-shrink:0;background:#fff;border:1px solid #000;border-radius:4px;padding:1px;position:relative;z-index:4;}
+    .iv-title{text-align:center;font-size:12.5px;font-weight:800;margin:5px 0 3px;}
     /* "INSTALMENT 2 OF 4" — the single most important line on this slip, so it
        gets its own reversed band instead of hiding in the info rows. */
-    .iv-instband{text-align:center;background:#000;color:#fff;font-family:Arial,sans-serif;font-size:11.5px;font-weight:800;letter-spacing:2px;padding:4px 6px;margin:0 0 7px;}
-    .iv-row{display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid #000;font-family:Arial,sans-serif;}
+    .iv-instband{text-align:center;background:#000;color:#fff;font-family:Arial,sans-serif;font-size:9.5px;font-weight:800;letter-spacing:1.5px;padding:3px 5px;margin:0 0 5px;}
+    .iv-row{display:flex;justify-content:space-between;gap:6px;padding:1.5px 0;border-bottom:1px solid #000;font-family:Arial,sans-serif;}
     .iv-lb{color:#000;}
     .iv-vl{font-weight:700;text-align:right;}
     /* The three figures a student actually looks for: what this instalment costs,
        what is due now, and what is left over the whole year. */
-    .iv-row-hi{background:#f0f0f0;padding:4px 4px;margin:0 -4px;border-bottom:1.5px solid #000;}
+    .iv-row-hi{background:#f0f0f0;padding:2.5px 3px;margin:0 -3px;border-bottom:1.5px solid #000;}
     .iv-row-hi .iv-lb{font-weight:800;}
-    .iv-row-hi .iv-vl{font-size:11.5px;}
+    .iv-row-hi .iv-vl{font-size:10px;}
     .iv-st-Paid{color:#065f46;}
     .iv-st-Partial,.iv-st-PartialOverdue{color:#92400e;}
     .iv-st-Overdue{color:#b91c1c;}
     .iv-st-Pending{color:#444;}
-    .iv-divider{border-top:2px solid #000;margin:6px 0;}
-    .iv-sched-h{font-weight:800;font-size:10px;margin:4px 0 4px;font-family:Arial,sans-serif;}
-    .iv-sched{width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:8.5px;}
-    .iv-sched th{background:#000;color:#fff;padding:3px 4px;text-align:left;font-size:8px;text-transform:uppercase;letter-spacing:.4px;}
-    .iv-sched td{padding:3px 4px;border-bottom:1px solid #999;}
+    .iv-divider{border-top:2px solid #000;margin:4px 0;}
+    .iv-sched-h{font-weight:800;font-size:8.5px;margin:3px 0 2px;font-family:Arial,sans-serif;}
+    .iv-sched{width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:7.5px;}
+    .iv-sched th{background:#000;color:#fff;padding:2px 3px;text-align:left;font-size:7px;text-transform:uppercase;letter-spacing:.3px;}
+    .iv-sched td{padding:2px 3px;border-bottom:1px solid #999;}
     .iv-sched tfoot td{border-top:1.5px solid #000;border-bottom:none;font-weight:800;}
     .iv-sched .iv-num{text-align:right;}
     .iv-sched th:nth-child(3),.iv-sched th:nth-child(4){text-align:right;}
     .iv-sched-now td{background:#f0f0f0;font-weight:800;}
-    .iv-bank-h,.iv-instr-h{font-weight:800;font-size:10px;margin:4px 0 3px;font-family:Arial,sans-serif;}
-    .iv-instr ol{padding-left:16px;font-size:8.5px;line-height:1.5;font-family:Arial,sans-serif;}
-    .iv-sig-row{display:flex;justify-content:space-between;margin-top:22px;font-family:Arial,sans-serif;font-size:9.5px;}
-    .iv-sig{border-top:1px solid #000;padding-top:3px;width:40%;text-align:center;}
-    .iv-seal{width:52px;height:52px;border:1.5px dashed #666;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:8px auto 0;font-family:Arial,sans-serif;font-size:6.5px;font-weight:700;color:#666;text-align:center;line-height:1.3;}
-    .iv-copy-lbl{text-align:center;font-weight:800;font-size:11px;margin-top:8px;font-family:Arial,sans-serif;}
-    .iv-foot{text-align:center;font-size:7.5px;color:#666;margin-top:5px;font-family:Arial,sans-serif;}
+    .iv-bank-h,.iv-instr-h{font-weight:800;font-size:8.5px;margin:3px 0 2px;font-family:Arial,sans-serif;}
+    .iv-instr ol{padding-left:12px;font-size:7.2px;line-height:1.35;font-family:Arial,sans-serif;}
+    .iv-sig-row{display:flex;justify-content:space-between;margin-top:10px;font-family:Arial,sans-serif;font-size:8px;}
+    .iv-sig{border-top:1px solid #000;padding-top:2px;width:40%;text-align:center;}
+    .iv-seal{width:34px;height:34px;border:1.5px dashed #666;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:5px auto 0;font-family:Arial,sans-serif;font-size:5px;font-weight:700;color:#666;text-align:center;line-height:1.2;}
+    .iv-copy-lbl{text-align:center;font-weight:800;font-size:8.5px;margin-top:4px;font-family:Arial,sans-serif;}
+    .iv-foot{text-align:center;font-size:6px;color:#666;margin-top:3px;font-family:Arial,sans-serif;}
     @media print{
       html,body{background:#fff!important;}
       body{padding:0!important;margin:0!important;}
       .no-print-bar,.prt-btn{display:none!important;}
+      /* The Annual Fee / Total Paid / Remaining / Status bar is useful on
+         screen before printing, but should never appear on the printed
+         page itself — in ANY mode (all / paid / remaining). */
+      .iv-summary{display:none!important;}
       /* Keep a whole slip together, but do NOT force one slip per page: the
          landscape grid is meant to fit several side by side. */
       .iv-card{page-break-inside:avoid;break-inside:avoid;}
-      .iv-summary{page-break-inside:avoid;break-inside:avoid;}
       @page{size:A4 landscape;margin:10mm;}
     }
   </style></head><body>
   <div class="no-print-bar">
-    <div class="npb-txt"><h4>Fee Vouchers — ${stu.name||''}</h4><p>${rows.length} voucher(s) · ${mode==='all'?`All ${plan.rows.length} instalments`:mode==='paid'?'Paid instalments':'Remaining instalments'} · Landscape</p></div>
+    <div class="npb-txt"><h4>Fee Vouchers — ${stu.name||''}</h4><p>${rows.length} voucher(s) · ${mode==='all'?`All ${plan.rows.length} instalments`:mode==='paid'?'Paid instalments':'Remaining instalments'} · Landscape — fits on 1 page</p></div>
     <button class="prt-btn" onclick="window.print()">🖨️ Print</button>
   </div>
+  <div class="page-fit-outer">
   <div class="wrap">
     ${summaryBar}
     <div class="iv-grid">${rows.map(voucherCard).join('')}</div>
+  </div>
   </div>
   <script>
     (function renderQrSlots(attemptsLeft){
@@ -5337,6 +5345,43 @@ function printInstalmentVouchers(roll, planKey, mode){
         new QRCode(el, { text: el.dataset.qr, width: 34, height: 34, colorDark: '#000000', colorLight: '#ffffff' });
       });
     })(25);
+
+    // ── FIT-TO-ONE-PAGE ──────────────────────────────────────────────────
+    // However many instalment cards there are (2, 3, 4, 6…), they must all
+    // land on the SAME printed sheet, never spill onto a second page. Since
+    // the grid's natural size can exceed one landscape page once cards get
+    // tall (full schedule + bank + instructions + signatures per card), we
+    // measure the actual rendered size just before printing and shrink the
+    // whole block with a single transform:scale() so it always fits exactly
+    // one A4-landscape page — the on-screen preview stays full-size and
+    // scrollable; only the print output is scaled down.
+    function fitIvToOnePage(){
+      var outer = document.querySelector('.page-fit-outer');
+      var inner = document.querySelector('.wrap');
+      if(!outer || !inner) return;
+      inner.style.transform = 'none';
+      var pxPerMm = 96/25.4;
+      // Must match the @page size/margin rule above (A4 landscape, 10mm margin).
+      var pageWpx = (297-20)*pxPerMm, pageHpx = (210-20)*pxPerMm;
+      var contentW = inner.scrollWidth, contentH = inner.scrollHeight;
+      var scale = Math.min(1, pageWpx/contentW, pageHpx/contentH);
+      inner.style.transformOrigin = 'top left';
+      inner.style.transform = 'scale(' + scale + ')';
+      outer.style.width = pageWpx + 'px';
+      outer.style.height = pageHpx + 'px';
+      outer.style.overflow = 'hidden';
+    }
+    function resetIvFit(){
+      var outer = document.querySelector('.page-fit-outer');
+      var inner = document.querySelector('.wrap');
+      if(!outer || !inner) return;
+      inner.style.transform = 'none';
+      outer.style.width = '';
+      outer.style.height = '';
+      outer.style.overflow = 'visible';
+    }
+    window.addEventListener('beforeprint', fitIvToOnePage);
+    window.addEventListener('afterprint', resetIvFit);
   <\/script>
   </body></html>`;
   showPrintPreview(h,'Fee Vouchers - '+(stu.name||roll));
@@ -6267,10 +6312,144 @@ function printVoucher(idx){
 </div><!-- /card -->`;
   };
 
+  // ── HORIZONTAL 3-COPY LAYOUT — ONE landscape A4 page, 3 columns side by
+  // side (College | Student | Bank), separated by a vertical dashed cut
+  // line — the classic bank-challan layout. Each column keeps the same rich
+  // content as the old full-page template (student info, itemised Fee
+  // Breakdown table, payment instructions, bank details, signatures) styled
+  // like the Transport module's "Charge & Payment Summary" table. There is
+  // no separate big total callout — the TOTAL row inside the Fee Breakdown
+  // table itself is what shows the amount, highlighted.
+  const FONT2 = `-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Arial,sans-serif`;
+  const brand = isInstalment ? '#4338ca' : '#0d7a4f';
+  const brandDeep = isInstalment ? '#1e1b64' : '#0a3d2a';
+  const totalRowLabel = alreadyPaid>0 ? 'BALANCE NOW PAYABLE' : (isInstalment ? 'TOTAL — This Challan' : 'TOTAL — '+(f.sem||'Fee'));
+
+  const genColumnCopy = (copyLabel, copyType) => {
+    const stripeClr  = copyType==='student' ? brand : copyType==='office' ? '#2563eb' : '#7c3aed';
+    const stripeSoft = copyType==='student' ? (isInstalment?'#eef2ff':'#ecfdf5') : copyType==='office' ? '#eff6ff' : '#f5f3ff';
+    return `
+<div class="col">
+  <!-- HEADER -->
+  <div style="display:flex;align-items:center;gap:7px;border-bottom:2px solid ${brand};padding-bottom:7px;margin-bottom:9px">
+    <div style="width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,${brandDeep},${brand});display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#fff;flex-shrink:0;overflow:hidden">${getLogoBadgeInner()}</div>
+    <div style="min-width:0;flex:1">
+      <div style="font-size:11.5px;font-weight:800;color:${brandDeep};line-height:1.2">${D.settings.instName||''}</div>
+      <div style="font-size:7px;color:#64748b">${D.settings.city||''} · AY ${academicYear}</div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+    <span style="background:${stripeSoft};color:${stripeClr};font-size:7.5px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:10px;text-transform:uppercase">${copyLabel}</span>
+    <span style="background:#f1f5f9;color:#475569;font-size:7px;font-weight:700;letter-spacing:.4px;padding:3px 7px;border-radius:10px;text-transform:uppercase">${docKind}</span>
+    ${vchStatusBadge(feeSt,{size:7,pad:'2px 7px'})}
+  </div>
+
+  <!-- STUDENT INFO -->
+  <div style="background:#f8fafc;border-radius:8px;padding:8px 9px;margin-bottom:9px">
+    <div style="font-size:7px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${stripeClr};margin-bottom:5px">Student Information</div>
+    <table style="width:100%;border-collapse:collapse;font-size:8.5px">
+      <tr><td style="color:#94a3b8;padding:1.5px 0;width:38%">Name</td><td style="font-weight:700;color:#0f172a">${stu.name}</td></tr>
+      <tr><td style="color:#94a3b8;padding:1.5px 0">Roll No.</td><td style="font-weight:700;color:${stripeClr}">${stu.roll}</td></tr>
+      <tr><td style="color:#94a3b8;padding:1.5px 0">Father</td><td style="color:#334155">${stu.father||'—'}</td></tr>
+      <tr><td style="color:#94a3b8;padding:1.5px 0">Class/Sec.</td><td style="color:#334155">${(stu.cls||'—').replace('Inter-','')}${stu.section?' ('+stu.section+')':''}</td></tr>
+      <tr><td style="color:#94a3b8;padding:1.5px 0">Semester</td><td style="color:#334155">${stu.sem||f.sem||'—'}</td></tr>
+      <tr><td style="color:#94a3b8;padding:1.5px 0">Voucher No.</td><td style="font-weight:700;color:#0f172a">${voucherNo}</td></tr>
+    </table>
+  </div>
+
+  <!-- FEE BREAKDOWN — styled like Transport's Charge & Payment Summary table -->
+  <div style="font-size:7px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${stripeClr};margin-bottom:5px">Fee Breakdown</div>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:9px;font-size:8px">
+    <thead><tr style="background:#f8fafc">
+      <th style="padding:4px 6px;border:1px solid #e2e8f0;font-size:6.5px;text-transform:uppercase;color:#64748b;text-align:left">Fee Component</th>
+      <th style="padding:4px 6px;border:1px solid #e2e8f0;font-size:6.5px;text-transform:uppercase;color:#64748b;text-align:right">Amount</th>
+    </tr></thead>
+    <tbody>
+      ${instBreakdownRowsCompact}
+      <tr><td style="padding:5px 6px;border:1px solid #e2e8f0;font-weight:800;color:${brandDeep};background:${stripeSoft}">${totalRowLabel}</td><td style="padding:5px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:800;color:${brandDeep};background:${stripeSoft}">Rs ${grandTotal.toLocaleString()}</td></tr>
+    </tbody>
+  </table>
+
+  <div style="font-size:7.5px;color:#64748b;margin-bottom:9px">Issued ${todayFmt} · Due <strong style="color:${isOverdue?'#b91c1c':'#0f172a'}">${dueFmt}</strong> · Expires ${expiryFmt}</div>
+
+  <!-- QR -->
+  <div style="text-align:center;margin-bottom:9px">
+    <div class="qr-slot" data-qr="${qrPayload}" style="width:44px;height:44px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin:0 auto;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
+  </div>
+
+  <!-- PAYMENT INSTRUCTIONS -->
+  <div style="background:#f8fafc;border-radius:8px;padding:8px 9px;margin-bottom:9px">
+    <div style="font-size:7px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${stripeClr};margin-bottom:4px">Payment Instructions</div>
+    <div style="font-size:7.5px;color:#475569;line-height:1.7">
+      Pay on/before due date. <span style="color:#dc2626;font-weight:700">Late fee ${D.settings.lateFeePct||0}%</span> after due date.<br>
+      Present at Accounts Office / Bank.<br>
+      Queries: <strong>${D.settings.accountsPhone||D.settings.contact||'—'}</strong>
+    </div>
+  </div>
+
+  <!-- BANK INFO — narrow column version -->
+  <div style="background:${stripeSoft};border-radius:8px;padding:8px 9px;margin-bottom:11px">
+    <div style="font-size:7px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${stripeClr};margin-bottom:4px">Bank / Online Payment</div>
+    <div style="font-size:7.5px;color:#334155;line-height:1.7">
+      ${D.settings.bankName?`<strong>${D.settings.bankName}</strong>${D.settings.bankBranch?' — '+D.settings.bankBranch:''}<br>`:''}
+      ${D.settings.bankAccountTitle||D.settings.instName?'A/C: <strong>'+(D.settings.bankAccountTitle||D.settings.instName)+'</strong><br>':''}
+      ${D.settings.bankAccountNo?'A/C No: <strong>'+D.settings.bankAccountNo+'</strong><br>':''}
+      ${D.settings.bankIBAN?'IBAN: <strong>'+D.settings.bankIBAN+'</strong><br>':''}
+      ${D.settings.bankJazzCash?'JazzCash: <strong>'+D.settings.bankJazzCash+'</strong><br>':''}
+      ${D.settings.bankEasyPaisa?'EasyPaisa: <strong>'+D.settings.bankEasyPaisa+'</strong><br>':''}
+      <span style="color:#94a3b8;font-size:6.5px">Mention Roll No. in description</span>
+    </div>
+  </div>
+
+  <!-- SIGNATURES — stacked, narrow -->
+  <div style="display:flex;flex-direction:column;gap:9px">
+    <div style="text-align:center">
+      <div style="border-bottom:1px solid #cbd5e1;height:14px"></div>
+      <div style="font-size:6px;color:#94a3b8;text-transform:uppercase;margin-top:2px">Student / Parent Signature</div>
+    </div>
+    <div style="text-align:center">
+      <div style="border-bottom:1px dashed #cbd5e1;height:14px"></div>
+      <div style="font-size:6px;color:#94a3b8;text-transform:uppercase;margin-top:2px">Accounts Officer / Cashier</div>
+    </div>
+    <div style="text-align:center">
+      <div style="width:26px;height:26px;border:1.2px dashed #cbd5e1;border-radius:50%;margin:0 auto"></div>
+      <div style="font-size:6px;color:#94a3b8;text-transform:uppercase;margin-top:2px">College Seal</div>
+    </div>
+  </div>
+
+  <div style="margin-top:9px;font-size:6px;color:#94a3b8;text-align:center">Generated ${todayFmt} · ${voucherNo}</div>
+</div>`;
+  };
+
+  // Same row-building as instBreakdownRows above, but with the narrower font
+  // sizes/padding this 3-column layout needs (icons kept, wording shortened).
+  let instBreakdownRowsCompact = `<tr><td style="padding:4px 6px;border:1px solid #e2e8f0;color:#334155">${baseLabel}${f.instPart?' — Inst. '+f.instPart:''}</td><td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#1a3a2a">${baseComponentAmt.toLocaleString()}</td></tr>`;
+  mergedExtraFees.forEach(ex=>{
+    instBreakdownRowsCompact += `<tr><td style="padding:4px 6px;border:1px solid #e2e8f0;color:#0e5c8c">📦 ${ex.category}</td><td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#0e5c8c">${(ex.grossAmt||ex.amt||0).toLocaleString()}</td></tr>`;
+  });
+  if(appliedLateFeeAmt>0){
+    instBreakdownRowsCompact += `<tr><td style="padding:4px 6px;border:1px solid #e2e8f0;color:#b91c1c">⚠ Late Fee (${D.settings.lateFeePct}%)</td><td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#b91c1c">${appliedLateFeeAmt.toLocaleString()}</td></tr>`;
+  }
+  if(feeScholarshipAmt(f)>0){
+    instBreakdownRowsCompact += `<tr><td style="padding:4px 6px;border:1px solid #e2e8f0;color:#15803d">🎓 Less — ${f.scholarshipLabel||'Scholarship'}</td><td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${feeScholarshipAmt(f).toLocaleString()}</td></tr>`;
+  }
+  if(feeConcessionAmt(f)>0){
+    instBreakdownRowsCompact += `<tr><td style="padding:4px 6px;border:1px solid #e2e8f0;color:#15803d">🎓 Less — Concession</td><td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${feeConcessionAmt(f).toLocaleString()}</td></tr>`;
+  }
+  if(voucherLateFee>0){
+    instBreakdownRowsCompact += `<tr><td style="padding:4px 6px;border:1px solid #e2e8f0;color:#b91c1c">⚠ Late Fee (Overdue)</td><td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#b91c1c">${voucherLateFee.toLocaleString()}</td></tr>`;
+  }
+  voucherFines.list.forEach(fine=>{
+    instBreakdownRowsCompact += `<tr><td style="padding:4px 6px;border:1px solid #e2e8f0;color:#b91c1c">🚨 Fine — ${fine.reason}</td><td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#b91c1c">${fine.amt.toLocaleString()}</td></tr>`;
+  });
+  if(alreadyPaid>0){
+    instBreakdownRowsCompact += `<tr><td style="padding:4px 6px;border:1px solid #e2e8f0;color:#15803d">✔ Already Received</td><td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${alreadyPaid.toLocaleString()}</td></tr>`;
+  }
+
   const css = `
     *{box-sizing:border-box;margin:0;padding:0;}
     html{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
-    body{font-family:Arial,sans-serif;background:#e8ecef;padding:16px;}
+    body{font-family:${FONT2};background:#e8ecef;padding:16px;color:#0f172a;}
     .no-print{margin-bottom:20px;display:flex;align-items:center;gap:10px;background:#fff;padding:14px 18px;border-radius:8px;border:1px solid #d1d5db;box-shadow:0 2px 8px rgba(0,0,0,.08);flex-wrap:wrap;}
     .no-print-left{flex:1;min-width:0}
     .no-print h3{font-size:15px;font-weight:800;color:#0d3b1e;margin-bottom:3px}
@@ -6278,43 +6457,38 @@ function printVoucher(idx){
     .btn-row{display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0}
     .nbtn{padding:9px 18px;border:none;border-radius:6px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;transition:opacity .15s}
     .nbtn:hover{opacity:.85}
-    .cut-line{display:flex;align-items:center;gap:10px;margin:16px 0;color:#9ca3af;font-size:10.5px;font-family:Arial,sans-serif}
-    .cut-line::before,.cut-line::after{content:'';flex:1;border-top:1.5px dashed #cbd5e1}
-    .cut-scissors{font-size:13px}
-    /* Page breaks ride on .vch-copy itself (see vchPrintCss) — an empty
-       <div class="page-break"> between siblings is ignored by Chrome's PDF
-       engine often enough that copies 2 and 3 landed on page 1. */
-    ${vchPrintCss('A4')}
+    /* SHEET — 3 columns side by side on ONE landscape page. */
+    .sheetH{max-width:1050px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,.10);border:1px solid #eef0f2;display:flex;align-items:stretch;}
+    .col{flex:1;min-width:0;padding:12px 12px;border-right:1.5px dashed #cbd5e1;}
+    .col:last-child{border-right:none;}
     @media print{
-      .vch-copy{box-shadow:none!important;border-radius:0!important;border:none!important;}
+      html,body{background:#fff!important;}
+      body{padding:0!important;margin:0!important;}
+      .no-print{display:none!important;}
+      .sheetH{box-shadow:none!important;border-radius:0!important;border:none!important;max-width:none!important;}
+      .col{page-break-inside:avoid;break-inside:avoid;}
+      @page{size:A4 landscape;margin:8mm;}
     }`;
 
-  // Real labels — these reach genCopy's `copyLabel` and print on the copy badge.
-  // The parameter existed before but every call passed `c.label` on an object
-  // that had no `label`, so the badge silently fell back to the copyType map.
   const copies = [
-    {type:'student', label:'STUDENT COPY'},
     {type:'office',  label:'COLLEGE COPY'},
+    {type:'student', label:'STUDENT COPY'},
     {type:'bank',    label:'BANK COPY'},
   ];
-
-  const allCopies = copies.map((c,i) =>
-    genCopy(c.label, c.type) + (i < copies.length-1 ?
-      `<div class="cut-line"><span class="cut-scissors">✂</span> <span style="letter-spacing:1px;text-transform:uppercase;font-size:9.5px">cut here — ${copies[i+1].label} below</span> <span class="cut-scissors">✂</span></div>` : '')
-  ).join('');
+  const allCopies = copies.map(c => genColumnCopy(c.label, c.type)).join('');
 
   const h = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fee Challan — ${stu.name} — ${voucherNo}</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><style>${css}</style></head><body>
   <div class="no-print">
     <div class="no-print-left">
       <h3>📄 ${isInstalment?'Instalment Fee Challan':'Full Fee Challan'} — ${stu.name}</h3>
-      <p>${voucherNo} &nbsp;·&nbsp; ${docKind} &nbsp;·&nbsp; Due: ${dueFmt} &nbsp;·&nbsp; Now payable: <strong>Rs ${grandTotal.toLocaleString()}</strong> &nbsp;·&nbsp; ${feeStatusLabel(feeSt)} &nbsp;·&nbsp; 3 Copies (Student · College · Bank)</p>
+      <p>${voucherNo} &nbsp;·&nbsp; ${docKind} &nbsp;·&nbsp; Due: ${dueFmt} &nbsp;·&nbsp; Now payable: <strong>Rs ${grandTotal.toLocaleString()}</strong> &nbsp;·&nbsp; ${feeStatusLabel(feeSt)} &nbsp;·&nbsp; 3 Copies on 1 Landscape Page (College · Student · Bank)</p>
     </div>
     <div class="btn-row">
-      <button class="nbtn" style="background:#0d3b1e;color:#fff" onclick="window.print()">🖨️ Print All 3 Copies</button>
+      <button class="nbtn" style="background:#0d3b1e;color:#fff" onclick="window.print()">🖨️ Print (1 Page, 3 Copies)</button>
       <button class="nbtn" style="background:#1d4ed8;color:#fff" onclick="window.print()" title="Choose Save as PDF in print dialog">⬇️ Save as PDF</button>
     </div>
   </div>
-  ${allCopies}
+  <div class="sheetH">${allCopies}</div>
   <script>
     // Render every QR placeholder locally once the QRCode library has loaded —
     // retried briefly in case the script tag is still fetching, so QR codes
@@ -6327,7 +6501,7 @@ function printVoucher(idx){
       document.querySelectorAll('.qr-slot').forEach(function(el){
         if (el.dataset.rendered) return;
         el.dataset.rendered = '1';
-        new QRCode(el, { text: el.dataset.qr, width: 52, height: 52, colorDark: '#0d3b1e', colorLight: '#ffffff' });
+        new QRCode(el, { text: el.dataset.qr, width: 44, height: 44, colorDark: '#0d3b1e', colorLight: '#ffffff' });
       });
     })(25);
   </script>
@@ -6402,6 +6576,162 @@ function printTransportVoucher(idx, mode){
   const fullyPaid = tfRemaining<=0;
 
   const infoRow=(l,v)=>`<tr><td style="padding:5px 2px;color:#64748b;font-size:10.5px;width:38%">${l}</td><td style="padding:5px 2px;font-weight:700;color:#0f172a;font-size:11.5px">${v}</td></tr>`;
+
+  // ── VOUCHER (unpaid demand slip) → 3 columns side by side on ONE landscape
+  // page (College | Student | Bank), same pattern as the main Fee Voucher.
+  // Fee Breakdown shown as a table (Fee / Received / Balance rows) with the
+  // total inside its highlighted row — no separate big amount callout.
+  // RECEIPT (proof of payment) → stays the single full sheet above, since
+  // only the student needs a paid receipt — same as printReceipt().
+  if(!isReceipt){
+    const genTfColumn = (copyLabel, copyType) => {
+      const stripeClr  = copyType==='student' ? brand : copyType==='office' ? '#2563eb' : '#7c3aed';
+      const stripeSoft = copyType==='student' ? '#ecfeff' : copyType==='office' ? '#eff6ff' : '#f5f3ff';
+      return `
+<div class="col">
+  <div style="display:flex;align-items:center;gap:7px;border-bottom:2px solid ${brand};padding-bottom:7px;margin-bottom:9px">
+    <div style="width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,${brandDeep},${brand});display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#fff;flex-shrink:0;overflow:hidden">${getLogoBadgeInner()}</div>
+    <div style="min-width:0;flex:1">
+      <div style="font-size:11.5px;font-weight:800;color:${brandDeep};line-height:1.2">${D.settings.instName||''}</div>
+      <div style="font-size:7px;color:#64748b">${D.settings.city||''} · AY ${academicYear}</div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+    <span style="background:${stripeSoft};color:${stripeClr};font-size:7.5px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:10px;text-transform:uppercase">${copyLabel}</span>
+    <span style="background:#f1f5f9;color:#475569;font-size:7px;font-weight:700;letter-spacing:.4px;padding:3px 7px;border-radius:10px;text-transform:uppercase">🚌 TRANSPORT</span>
+    ${vchStatusBadge(tfStatus,{size:7,pad:'2px 7px'})}
+  </div>
+
+  <div style="background:#f8fafc;border-radius:8px;padding:8px 9px;margin-bottom:9px">
+    <div style="font-size:7px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${stripeClr};margin-bottom:5px">Student Information</div>
+    <table style="width:100%;border-collapse:collapse;font-size:8.5px">
+      <tr><td style="color:#94a3b8;padding:1.5px 0;width:38%">Name</td><td style="font-weight:700;color:#0f172a">${stu.name}</td></tr>
+      <tr><td style="color:#94a3b8;padding:1.5px 0">Roll No.</td><td style="font-weight:700;color:${stripeClr}">${stu.roll}</td></tr>
+      <tr><td style="color:#94a3b8;padding:1.5px 0">Class/Sec.</td><td style="color:#334155">${(stu.cls||'—')}${stu.section?' ('+stu.section+')':''} · ${stu.sem||'—'}</td></tr>
+      <tr><td style="color:#94a3b8;padding:1.5px 0">Route</td><td style="color:#334155">${t.route||'—'}</td></tr>
+      <tr><td style="color:#94a3b8;padding:1.5px 0">Due Date</td><td style="font-weight:700;color:${isOverdue?'#b91c1c':'#0f172a'}">${dueFmt}</td></tr>
+      <tr><td style="color:#94a3b8;padding:1.5px 0">Voucher No.</td><td style="font-weight:700;color:#0f172a">${voucherNo}</td></tr>
+    </table>
+  </div>
+
+  <!-- FEE BREAKDOWN — Fee / Received / Balance, total inside the table -->
+  <div style="font-size:7px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${stripeClr};margin-bottom:5px">Fee Breakdown</div>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:9px;font-size:8px">
+    <thead><tr style="background:#f8fafc">
+      <th style="padding:4px 6px;border:1px solid #e2e8f0;font-size:6.5px;text-transform:uppercase;color:#64748b;text-align:left">Fee Component</th>
+      <th style="padding:4px 6px;border:1px solid #e2e8f0;font-size:6.5px;text-transform:uppercase;color:#64748b;text-align:right">Amount</th>
+    </tr></thead>
+    <tbody>
+      <tr><td style="padding:4px 6px;border:1px solid #e2e8f0;color:#334155">Transport Fee</td><td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#0f172a">${tfAmt.toLocaleString()}</td></tr>
+      ${tfPaid>0?`<tr><td style="padding:4px 6px;border:1px solid #e2e8f0;color:#15803d">✔ Received to date</td><td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#15803d">− ${tfPaid.toLocaleString()}</td></tr>`:''}
+      <tr><td style="padding:5px 6px;border:1px solid #e2e8f0;font-weight:800;color:${brandDeep};background:${stripeSoft}">Balance ${tfRemaining>0?'Due':'— Fully Settled'}</td><td style="padding:5px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:800;color:${brandDeep};background:${stripeSoft}">Rs ${tfRemaining.toLocaleString()}</td></tr>
+    </tbody>
+  </table>
+
+  <div style="font-size:7.5px;color:#64748b;margin-bottom:9px">Issued ${todayFmt} · Due <strong style="color:${isOverdue?'#b91c1c':'#0f172a'}">${dueFmt}</strong></div>
+
+  <div style="text-align:center;margin-bottom:9px">
+    <div class="qr-slot" data-qr="${qrPayload}" style="width:44px;height:44px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin:0 auto;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
+  </div>
+
+  <div style="background:#f8fafc;border-radius:8px;padding:8px 9px;margin-bottom:9px">
+    <div style="font-size:7px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${stripeClr};margin-bottom:4px">Payment Instructions</div>
+    <div style="font-size:7.5px;color:#475569;line-height:1.7">
+      Pay on/before due date at Accounts / Transport Office.<br>
+      Bus service may pause if unpaid past due date.<br>
+      Queries: <strong>${D.settings.accountsPhone||D.settings.contact||'—'}</strong>
+    </div>
+  </div>
+
+  <div style="background:${stripeSoft};border-radius:8px;padding:8px 9px;margin-bottom:11px">
+    <div style="font-size:7px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${stripeClr};margin-bottom:4px">Bank / Online Payment</div>
+    <div style="font-size:7.5px;color:#334155;line-height:1.7">
+      ${D.settings.bankName?`<strong>${D.settings.bankName}</strong>${D.settings.bankBranch?' — '+D.settings.bankBranch:''}<br>`:''}
+      ${D.settings.bankAccountTitle||D.settings.instName?'A/C: <strong>'+(D.settings.bankAccountTitle||D.settings.instName)+'</strong><br>':''}
+      ${D.settings.bankAccountNo?'A/C No: <strong>'+D.settings.bankAccountNo+'</strong><br>':''}
+      ${D.settings.bankIBAN?'IBAN: <strong>'+D.settings.bankIBAN+'</strong><br>':''}
+      <span style="color:#94a3b8;font-size:6.5px">Mention Roll No. in description</span>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:9px">
+    <div style="text-align:center">
+      <div style="border-bottom:1px solid #cbd5e1;height:14px"></div>
+      <div style="font-size:6px;color:#94a3b8;text-transform:uppercase;margin-top:2px">Student / Parent Signature</div>
+    </div>
+    <div style="text-align:center">
+      <div style="border-bottom:1px dashed #cbd5e1;height:14px"></div>
+      <div style="font-size:6px;color:#94a3b8;text-transform:uppercase;margin-top:2px">Transport Officer / Cashier</div>
+    </div>
+    <div style="text-align:center">
+      <div style="width:26px;height:26px;border:1.2px dashed #cbd5e1;border-radius:50%;margin:0 auto"></div>
+      <div style="font-size:6px;color:#94a3b8;text-transform:uppercase;margin-top:2px">College Seal</div>
+    </div>
+  </div>
+
+  <div style="margin-top:9px;font-size:6px;color:#94a3b8;text-align:center">Generated ${todayFmt} · ${voucherNo}</div>
+</div>`;
+    };
+
+    const cssTfH = `
+      *{box-sizing:border-box;margin:0;padding:0;}
+      html{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      body{font-family:${FONT};background:#e8ecef;padding:16px;color:#0f172a;}
+      .no-print{margin-bottom:20px;display:flex;align-items:center;gap:10px;background:#fff;padding:14px 18px;border-radius:8px;border:1px solid #d1d5db;box-shadow:0 2px 8px rgba(0,0,0,.08);flex-wrap:wrap;}
+      .no-print-left{flex:1;min-width:0}
+      .no-print h3{font-size:15px;font-weight:800;color:${brandDeep};margin-bottom:3px}
+      .no-print p{font-size:11px;color:#6b7280}
+      .btn-row{display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0}
+      .nbtn{padding:9px 18px;border:none;border-radius:6px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit}
+      .sheetH{max-width:1050px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 4px 24px rgba(15,23,42,.10);border:1px solid #eef0f2;display:flex;align-items:stretch;}
+      .col{flex:1;min-width:0;padding:12px 12px;border-right:1.5px dashed #cbd5e1;}
+      .col:last-child{border-right:none;}
+      @media print{
+        html,body{background:#fff!important;}
+        body{padding:0!important;margin:0!important;}
+        .no-print{display:none!important;}
+        .sheetH{box-shadow:none!important;border-radius:0!important;border:none!important;max-width:none!important;}
+        .col{page-break-inside:avoid;break-inside:avoid;}
+        @page{size:A4 landscape;margin:8mm;}
+      }`;
+
+    const tfCopies = [
+      {type:'office',  label:'COLLEGE COPY'},
+      {type:'student', label:'STUDENT COPY'},
+      {type:'bank',    label:'BANK COPY'},
+    ];
+    const allTfCopies = tfCopies.map(c => genTfColumn(c.label, c.type)).join('');
+
+    const h3 = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${docLabel} — ${stu.name} — ${voucherNo}</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><style>${cssTfH}</style></head><body>
+    <div class="no-print">
+      <div class="no-print-left">
+        <h3>🚌 ${docLabel} — ${stu.name}</h3>
+        <p>${voucherNo} &nbsp;·&nbsp; Route: ${t.route||'—'} &nbsp;·&nbsp; Due: ${dueFmt} &nbsp;·&nbsp; Amount Due: <strong>Rs ${tfRemaining.toLocaleString()}</strong> &nbsp;·&nbsp; 3 Copies on 1 Landscape Page (College · Student · Bank)</p>
+      </div>
+      <div class="btn-row">
+        <button class="nbtn" style="background:${brandDeep};color:#fff" onclick="window.print()">🖨️ Print (1 Page, 3 Copies)</button>
+        <button class="nbtn" style="background:#1d4ed8;color:#fff" onclick="window.print()" title="Choose Save as PDF in print dialog">⬇️ Save as PDF</button>
+      </div>
+    </div>
+    <div class="sheetH">${allTfCopies}</div>
+    <script>
+      (function renderQrSlots(attemptsLeft){
+        if (typeof QRCode === 'undefined') {
+          if (attemptsLeft > 0) return void setTimeout(function(){ renderQrSlots(attemptsLeft-1); }, 200);
+          return;
+        }
+        document.querySelectorAll('.qr-slot').forEach(function(el){
+          if (el.dataset.rendered) return;
+          el.dataset.rendered = '1';
+          new QRCode(el, { text: el.dataset.qr, width: 44, height: 44, colorDark: '${brandDeep}', colorLight: '#ffffff' });
+        });
+      })(25);
+    <\/script>
+    </body></html>`;
+
+    showPrintPreview(h3, docLabel + ' — ' + stu.name);
+    return;
+  }
 
   const h=`<!DOCTYPE html><html><head><meta charset="UTF-8">
   <title>${docLabel} — ${stu.name}${docNo?' — '+docNo:''}</title>
