@@ -86,15 +86,27 @@ const D = {
   feePayments:[],
   tx:[],
   manualTx:[],
-  seq:{fee:0,sal:0,exp:0,fine:2,tf:0,tftx:0},
+  seq:{fee:0,sal:0,exp:0,fine:2,tf:0,tftx:0,rt:2},
+  // ── Route / Vehicle Master ── the fixed vans/routes the college runs.
+  // Each route has its own vehicle, driver and a fixed monthly fee, which
+  // the Transport Fee assignment picks from instead of typing the same
+  // route name and amount by hand every single time.
+  routes:[
+    {routeId:'RT-1', name:'Model Town → Campus', vehicleNo:'LES-4521', driverName:'Ahmed Khan', driverPhone:'0300-1234567', capacity:40, monthlyFee:2500, status:'Active'},
+    {routeId:'RT-2', name:'Johar Town → Campus', vehicleNo:'LEB-7788', driverName:'Bilal Ahmed', driverPhone:'0301-9876543', capacity:35, monthlyFee:2500, status:'Active'},
+  ],
   // ── Transport Fee module ── own record set, kept separate from the
   // general Tuition fee, since only some students actually use the
   // college transport/van — not everyone gets one. Has its own
   // Pending/Overdue/Paid lifecycle and its own dedicated voucher, mirroring
   // how the Disciplinary Fines module keeps its own independent records.
+  // `payments[]` (added alongside partial-payment support) itemises every
+  // instalment collected against a record, the same way D.fees does — the
+  // cumulative total always lives in `paidAmt`, payments[] is only for the
+  // receipt/ledger breakdown.
   transportFees:[
-    {tfId:'TF-1', student:'Kamran Ali', roll:'B-FSE-2024-01', route:'Model Town → Campus', amt:2500, date:'-', method:'-', receipt:'-', status:'Overdue', dueDate:'2025-01-05'},
-    {tfId:'TF-2', student:'Hina Bashir', roll:'G-ICS-2024-01', route:'Johar Town → Campus', amt:2500, date:'3 Jan 2025', method:'Cash', receipt:'TFR-2001', status:'Paid', dueDate:'2025-01-10'},
+    {tfId:'TF-1', student:'Kamran Ali', roll:'B-FSE-2024-01', route:'Model Town → Campus', routeId:'RT-1', amt:2500, date:'-', method:'-', receipt:'-', status:'Overdue', dueDate:'2025-01-05'},
+    {tfId:'TF-2', student:'Hina Bashir', roll:'G-ICS-2024-01', route:'Johar Town → Campus', routeId:'RT-2', amt:2500, date:'3 Jan 2025', method:'Cash', receipt:'TFR-2001', status:'Paid', dueDate:'2025-01-10'},
   ],
   increments:[],
   leaves:[],
@@ -319,7 +331,28 @@ function buildTx() {
   });
   // Transport Fee is real college income too — include Paid transport fee
   // records in the Transactions ledger, same as regular tuition fee.
-  D.transportFees.forEach((t,idx)=>{if(t.status==='Paid')D.tx.push({id:'TFTXN-'+String(t.txSeq).padStart(3,'0'),desc:'Transport Fee - '+t.student,type:'Income',amt:t.amt,date:t.date,cat:'Transport',srcType:'transportFee',srcIdx:idx});});
+  // Transport Fee now supports partial payment (like the Fee module's
+  // instalments), so a record can have money received even while its raw
+  // status is still Pending/Overdue. Log every itemised payment in
+  // t.payments[] as its own ledger line (same pattern as feePaymentsFor
+  // above), falling back to one lump line for the cumulative paid amount —
+  // this keeps old records (status==='Paid', no payments[]) behaving
+  // exactly as before.
+  D.transportFees.forEach((t,idx)=>{
+    const paidAmt=tfPaidAmt(t);
+    if(paidAmt<=0) return;
+    const seq='TFTXN-'+String(t.txSeq).padStart(3,'0');
+    const label='Transport Fee - '+t.student;
+    let logged=0,n=0;
+    (Array.isArray(t.payments)?t.payments:[]).forEach(p=>{
+      const amt=Number(p.amount)||0;
+      if(amt<=0||logged+amt>paidAmt) return;
+      n++; logged+=amt;
+      D.tx.push({id:seq+'-'+n,desc:label,type:'Income',amt:amt,date:p.date||t.date,cat:'Transport',srcType:'transportFee',srcIdx:idx});
+    });
+    const rest=paidAmt-logged;
+    if(rest>0) D.tx.push({id:n?seq+'-'+(n+1):seq,desc:label,type:'Income',amt:rest,date:t.date,cat:'Transport',srcType:'transportFee',srcIdx:idx});
+  });
   D.salaries.forEach((s,idx)=>{if(s.status==='Paid')D.tx.push({id:'SAL-'+String(s.txSeq).padStart(2,'0'),desc:'Salary - '+s.name,type:'Expense',amt:netPay(s),date:s.month||todayStr(),cat:'Salaries',srcType:'salary',srcIdx:idx});});
   D.expenses.forEach((e,idx)=>{D.tx.push({id:'EXP-'+String(e.txSeq).padStart(2,'0'),desc:e.desc,type:'Expense',amt:e.amt,date:e.date,cat:e.cat,srcType:'expense',srcIdx:idx});});
   D.manualTx.forEach(m=>D.tx.push(m));
@@ -3617,7 +3650,7 @@ function rTransportFee(){
             ${rowSt==='Paid'
               ?`<button onclick="printTransportVoucher(${idx},'receipt');closeAllMenus()">🧾 Print Receipt</button>
                 <button onclick="printTransportVoucher(${idx},'voucher');closeAllMenus()">🖨️ Print Voucher</button>`
-              :`<button onclick="collectTransportFee(${idx});closeAllMenus()">💳 Collect Payment</button>
+              :`<button onclick="openCollectTransportFee(${idx});closeAllMenus()">💳 Collect Payment</button>
                 <button onclick="printTransportVoucher(${idx},'voucher');closeAllMenus()">🖨️ Print Voucher</button>
                 ${rowPaid>0?`<button onclick="printTransportVoucher(${idx},'receipt');closeAllMenus()">🧾 Print Receipt</button>`:''}`
             }
@@ -3708,7 +3741,10 @@ function openAddTransportFee(){
   $('tf-name').value='';$('tf-roll').value='';
   $('tfstu-search').value='';$('tfstu-list').innerHTML='';
   $('tfstu-selected').style.display='none';
+  fillTfRouteDropdown();
   $('tf-route').value='';
+  $('tf-route-custom').value='';
+  $('tf-route-custom').style.display='none';
   $('tf-amt').value='2500';
   $('tf-due').value=isoDate();
   $('tf-status').value='Pending';
@@ -3724,7 +3760,19 @@ function openEditTransportFee(idx){
   $('tf-name').value=t.student;$('tf-roll').value=t.roll;
   if(stu) transportSelectStu(stu.roll);
   else { $('tfstu-selected').style.display='block';$('tfstu-nm').textContent=t.student;$('tfstu-info').textContent=t.roll;$('tfstu-av').textContent=t.student[0]; }
-  $('tf-route').value=t.route||'';
+  fillTfRouteDropdown();
+  const matchedRoute=t.routeId&&D.routes.find(r=>r.routeId===t.routeId);
+  if(matchedRoute){
+    $('tf-route').value=t.routeId;
+    $('tf-route-custom').value='';
+    $('tf-route-custom').style.display='none';
+  }else{
+    // Legacy record (no routeId) or the route was later removed from the
+    // Master — fall back to Custom so the original saved name is preserved.
+    $('tf-route').value='__custom__';
+    $('tf-route-custom').value=t.route||'';
+    $('tf-route-custom').style.display='block';
+  }
   $('tf-amt').value=t.amt;
   $('tf-due').value=t.dueDate||isoDate();
   $('tf-status').value=t.status==='Overdue'?'Pending':t.status;
@@ -3737,7 +3785,11 @@ function saveTransportFee(){
   const stuName=$('tf-name').value||'';
   const stuRoll=$('tf-roll').value||'';
   if(!stuName||!stuRoll){toast('❌ Please select a student');return;}
-  const route=$('tf-route').value.trim();
+  const routeSel=$('tf-route').value;
+  const selectedRoute=routeSel&&routeSel!=='__custom__'?D.routes.find(r=>r.routeId===routeSel):null;
+  const route=selectedRoute?selectedRoute.name:$('tf-route-custom').value.trim();
+  const routeId=selectedRoute?selectedRoute.routeId:null;
+  if(!route){toast('❌ Please select a route (or add one via Route Master)');return;}
   const amt=parseInt($('tf-amt').value)||0;
   if(!amt||amt<0){toast('❌ Valid amount is required');return;}
   const due=$('tf-due').value;
@@ -3749,7 +3801,7 @@ function saveTransportFee(){
   if(isEdit){
     const t=D.transportFees[editIdx];
     const wasPaid=t.status==='Paid';
-    t.student=stuName;t.roll=stuRoll;t.route=route;t.amt=amt;t.dueDate=due;
+    t.student=stuName;t.roll=stuRoll;t.route=route;t.routeId=routeId;t.amt=amt;t.dueDate=due;
     if(statusSel==='Paid'&&!wasPaid){
       t.status='Paid';t.date=todayStr();t.method=t.method&&t.method!=='-'?t.method:'Cash';
       t.receipt=t.receipt&&t.receipt!=='-'?t.receipt:nextTfReceiptNo();
@@ -3767,7 +3819,7 @@ function saveTransportFee(){
     toast('✅ Transport fee updated');
   } else {
     D.seq.tf=(D.seq.tf||0)+1;
-    const t={tfId:'TF-'+D.seq.tf,student:stuName,roll:stuRoll,route:route,amt:amt,dueDate:due,status:status,
+    const t={tfId:'TF-'+D.seq.tf,student:stuName,roll:stuRoll,route:route,routeId:routeId,amt:amt,dueDate:due,status:status,
       date:status==='Paid'?todayStr():'-', method:status==='Paid'?'Cash':'-',
       // paidAmt is the explicit money figure the voucher/receipt prints from.
       // Older records that predate it fall back through tfPaidAmt(t).
@@ -3781,20 +3833,66 @@ function saveTransportFee(){
   closeMo('addTransportFee');
   transportDeselectStu();
 }
-function collectTransportFee(idx){
+/* ══════════════════════════════════════════════════
+   TRANSPORT FEE — PARTIAL PAYMENT COLLECTION
+   Mirrors the Fee module's partial-payment flow: the clerk can collect
+   less than the full remaining balance in one go. Every payment is
+   appended to t.payments[] (amount, date, method) purely for the receipt/
+   ledger breakdown; t.paidAmt is always the cumulative source of truth
+   that tfPaidAmt()/tfRemainingAmt()/tfComputeStatus() read from.
+══════════════════════════════════════════════════ */
+let _tfCollectIdx=-1;
+function openCollectTransportFee(idx){
   if(!requirePerm('canEdit','collect transport fee'))return;
   const t=D.transportFees[idx];
-  if(!t)return;
-  t.status='Paid';
-  t.date=todayStr();
-  t.method='Cash';
-  t.paidAmt=Number(t.amt)||0;
-  t.receipt=t.receipt&&t.receipt!=='-'?t.receipt:nextTfReceiptNo();
-  auditLog('action','Transport fee collected: '+t.student+' — Rs '+t.amt);
-  // rStudents() too: the student's outstanding balance and status card are
-  // transport-aware now, so they go stale if only the transport tab refreshes.
+  if(!t){toast('Transport fee record not found');return;}
+  const remaining=tfRemainingAmt(t);
+  if(remaining<=0){toast('This record is already fully paid');return;}
+  _tfCollectIdx=idx;
+  $('ctf-name').textContent=t.student;
+  $('ctf-info').textContent=t.roll+(t.route?' · '+t.route:'');
+  $('ctf-total').textContent='Rs '+fmt(Number(t.amt)||0);
+  $('ctf-paid').textContent='Rs '+fmt(tfPaidAmt(t));
+  $('ctf-remaining').textContent='Rs '+fmt(remaining);
+  $('ctf-amt').value=remaining;
+  $('ctf-amt').max=remaining;
+  $('ctf-method').value='Cash';
+  $('ctf-date').value=isoDate();
+  showMo('collectTf');
+}
+function saveCollectTransportFee(){
+  if(!requirePerm('canEdit','collect transport fee'))return;
+  const t=D.transportFees[_tfCollectIdx];
+  if(!t){toast('Transport fee record not found');closeMo('collectTf');return;}
+  const remaining=tfRemainingAmt(t);
+  const amt=parseInt($('ctf-amt').value)||0;
+  if(!amt||amt<=0){toast('❌ Valid amount is required');return;}
+  if(amt>remaining){toast('❌ Amount can\'t exceed the remaining balance of Rs '+fmt(remaining));return;}
+  const method=$('ctf-method').value||'Cash';
+  const dateIso=$('ctf-date').value;
+  const date=dateIso?parseDate(dateIso).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}):todayStr();
+  if(!Array.isArray(t.payments)) t.payments=[];
+  t.payments.push({amount:amt,date:date,method:method});
+  t.paidAmt=tfPaidAmt(t)+amt;
+  t.date=date;
+  t.method=method;
+  if(!t.receipt||t.receipt==='-') t.receipt=nextTfReceiptNo();
+  // Keep the legacy raw status in step for older code that still reads
+  // t.status directly (dashboard alerts, older report totals) — Paid only
+  // once fully settled, otherwise Pending/Overdue by due date, same rule
+  // saveTransportFee() already uses.
+  const fullyPaid=tfRemainingAmt(t)<=0;
+  if(fullyPaid){
+    t.status='Paid';
+  }else{
+    const today=new Date(); today.setHours(0,0,0,0);
+    const due=t.dueDate?parseDate(t.dueDate):null; if(due)due.setHours(0,0,0,0);
+    t.status=(due&&due<today)?'Overdue':'Pending';
+  }
+  auditLog('action','Transport fee payment collected: '+t.student+' — Rs '+amt+(fullyPaid?' (fully paid)':' (partial)'));
   buildTx();rTransportFee();rDash();rStudents();
-  toast('✅ Rs '+fmt(t.amt)+' collected from '+t.student);
+  closeMo('collectTf');
+  toast('✅ Rs '+fmt(amt)+' collected from '+t.student+(fullyPaid?'':' · Rs '+fmt(tfRemainingAmt(t))+' still due'));
 }
 function delTransportFee(idx){
   if(!requirePerm('canEdit','delete transport fee'))return;
@@ -3805,6 +3903,250 @@ function delTransportFee(idx){
   auditLog('action','Transport fee deleted: '+t.student);
   buildTx();rTransportFee();rDash();
   toast('Transport fee record deleted');
+}
+
+/* ══════════════════════════════════════════════════
+   ROUTE / VEHICLE MASTER
+   The fixed list of vans/routes the college runs. Transport Fee assignment
+   picks a route from here (vehicle no, driver, capacity, fixed monthly fee)
+   instead of the route name and amount being typed by hand on every record.
+   Deleting a route does NOT touch already-issued transport fee records —
+   they keep their own stored route name/amount so history never changes
+   under a parent's already-printed voucher.
+══════════════════════════════════════════════════ */
+function nextRouteId(){
+  D.seq.rt=(D.seq.rt||0)+1;
+  return 'RT-'+D.seq.rt;
+}
+function routeUsageCount(routeId){
+  return D.transportFees.filter(t=>t.routeId===routeId).length;
+}
+function rRouteMaster(){
+  const tb=$('rtTB');
+  if(!tb)return;
+  if(!D.routes.length){
+    tb.innerHTML='<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--s4);font-size:13px">No routes added yet</td></tr>';
+  }else{
+    tb.innerHTML=D.routes.map(r=>{
+      const idx=D.routes.indexOf(r);
+      const cnt=routeUsageCount(r.routeId);
+      return`<tr>
+        <td><strong>${r.name}</strong></td>
+        <td>${r.vehicleNo||'—'}</td>
+        <td>${r.driverName||'—'}${r.driverPhone?'<div style="font-size:11px;color:var(--s4)">'+r.driverPhone+'</div>':''}</td>
+        <td>${r.capacity?r.capacity+' seats':'—'}</td>
+        <td><strong>Rs ${fmt(r.monthlyFee||0)}</strong></td>
+        <td>${bdg(r.status||'Active')}</td>
+        <td style="white-space:nowrap">
+          <button class="mo-cancel" style="padding:5px 10px;font-size:11px" onclick="openEditRoute(${idx})">✏️ Edit</button>
+          <button class="mo-cancel" style="padding:5px 10px;font-size:11px;color:var(--rd)" onclick="delRoute(${idx})">🗑 Delete${cnt?' ('+cnt+' in use)':''}</button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+  fillTfRouteDropdown();
+}
+function openRouteMaster(){
+  rRouteMaster();
+  showMo('routeMaster');
+}
+function openAddRoute(){
+  if(!requirePerm('canEdit','add route'))return;
+  $('rt-editIdx').value='-1';
+  $('rtMoTitle').textContent='🚐 Add Route / Vehicle';
+  $('rt-name').value='';$('rt-vehicle').value='';$('rt-driver').value='';
+  $('rt-phone').value='';$('rt-capacity').value='40';$('rt-fee').value='2500';
+  $('rt-status').value='Active';
+  showMo('addRoute');
+}
+function openEditRoute(idx){
+  if(!requirePerm('canEdit','edit route'))return;
+  const r=D.routes[idx];
+  if(!r)return;
+  $('rt-editIdx').value=idx;
+  $('rtMoTitle').textContent='✏️ Edit Route / Vehicle';
+  $('rt-name').value=r.name||'';
+  $('rt-vehicle').value=r.vehicleNo||'';
+  $('rt-driver').value=r.driverName||'';
+  $('rt-phone').value=r.driverPhone||'';
+  $('rt-capacity').value=r.capacity||'';
+  $('rt-fee').value=r.monthlyFee||0;
+  $('rt-status').value=r.status||'Active';
+  showMo('addRoute');
+}
+function saveRoute(){
+  if(!requirePerm('canEdit','save route'))return;
+  const editIdx=parseInt($('rt-editIdx').value);
+  const isEdit=editIdx>=0;
+  const name=$('rt-name').value.trim();
+  if(!name){toast('❌ Route name is required');return;}
+  const vehicleNo=$('rt-vehicle').value.trim();
+  const driverName=$('rt-driver').value.trim();
+  const driverPhone=$('rt-phone').value.trim();
+  const capacity=parseInt($('rt-capacity').value)||0;
+  const monthlyFee=parseInt($('rt-fee').value)||0;
+  if(!monthlyFee||monthlyFee<0){toast('❌ Valid monthly fee is required');return;}
+  const status=$('rt-status').value||'Active';
+  if(isEdit){
+    const r=D.routes[editIdx];
+    r.name=name;r.vehicleNo=vehicleNo;r.driverName=driverName;r.driverPhone=driverPhone;
+    r.capacity=capacity;r.monthlyFee=monthlyFee;r.status=status;
+    auditLog('action','Route updated: '+name);
+    toast('✅ Route updated');
+  }else{
+    D.routes.push({routeId:nextRouteId(),name,vehicleNo,driverName,driverPhone,capacity,monthlyFee,status});
+    auditLog('action','Route added: '+name);
+    toast('✅ Route "'+name+'" added');
+  }
+  closeMo('addRoute');
+  rRouteMaster();
+}
+function delRoute(idx){
+  if(!requirePerm('canEdit','delete route'))return;
+  const r=D.routes[idx];
+  if(!r)return;
+  const cnt=routeUsageCount(r.routeId);
+  if(!confirm('Delete route "'+r.name+'"?'+(cnt?' It is currently used by '+cnt+' transport fee record(s) — those records keep their own saved route name and amount and will NOT change.':'')))return;
+  D.routes.splice(idx,1);
+  auditLog('action','Route deleted: '+r.name);
+  rRouteMaster();
+  toast('Route deleted');
+}
+// Populates the Assign/Edit Transport Fee route dropdown from Route Master.
+function fillTfRouteDropdown(){
+  const sel=$('tf-route');
+  if(!sel)return;
+  const cur=sel.value;
+  const activeRoutes=D.routes.filter(r=>r.status==='Active');
+  sel.innerHTML='<option value="">-- Select Route --</option>'+
+    activeRoutes.map(r=>`<option value="${r.routeId}" data-fee="${r.monthlyFee||0}" data-name="${r.name}">${r.name} (Rs ${fmt(r.monthlyFee||0)}${r.vehicleNo?' · '+r.vehicleNo:''})</option>`).join('')+
+    '<option value="__custom__">Other / Custom…</option>';
+  if(cur) sel.value=cur;
+}
+// Fired when the clerk picks a route in the Assign Transport Fee modal — auto
+// fills the fixed monthly fee from Route Master so it doesn't have to be
+// retyped, while still leaving the amount field editable for one-off cases.
+// "Other / Custom…" reveals a free-text field instead of folding every
+// one-off pickup point into Route Master.
+function tfRouteSelected(val){
+  const customInput=$('tf-route-custom');
+  if(val==='__custom__'){
+    if(customInput){ customInput.style.display='block'; customInput.focus(); }
+    return;
+  }
+  if(customInput){ customInput.style.display='none'; customInput.value=''; }
+  const route=D.routes.find(r=>r.routeId===val);
+  if(route) $('tf-amt').value=route.monthlyFee||0;
+}
+
+/* ══════════════════════════════════════════════════
+   TRANSPORT FEE — MONTHLY AUTO-GENERATE
+   Mirrors the Salary module's Auto-Generate: once a student has been
+   assigned to a route, they are treated as "enrolled" going forward, so a
+   fresh fee record for the selected month can be generated in bulk instead
+   of the clerk re-creating one by hand for every student every month.
+   Enrollment is derived from each student's MOST RECENT transport fee
+   record (route + amount) rather than a separate enrollment list, so there
+   is nothing new to keep in sync.
+══════════════════════════════════════════════════ */
+// One row per roll — the last (most recently added) record for that
+// student, which is what "currently enrolled, on this route, at this fee"
+// means in the absence of an explicit un-enroll action.
+function tfEnrolledStudents(){
+  const map={};
+  D.transportFees.forEach(t=>{ map[t.roll]=t; });
+  return Object.values(map);
+}
+function openAutoGenTf(){
+  const months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const now=new Date();
+  const sel=$('agTfMonth');
+  if(sel){
+    sel.innerHTML='';
+    for(let i=0;i<12;i++){
+      const d=new Date(now.getFullYear(),now.getMonth()+i,1);
+      const label=months[d.getMonth()]+' '+d.getFullYear();
+      sel.innerHTML+=`<option value="${label}">${label}</option>`;
+    }
+  }
+  if($('agTfDueDay')) $('agTfDueDay').value='10';
+  refreshAutoGenTfPreview();
+  showMo('autoGenTf');
+}
+function refreshAutoGenTfPreview(){
+  const month=($('agTfMonth')||{}).value;
+  if(!month){$('agTfPreview').innerHTML='';return;}
+  const enrolled=tfEnrolledStudents();
+  const existingRolls=D.transportFees.filter(t=>t.month===month).map(t=>t.roll);
+  const toGen=enrolled.filter(t=>!existingRolls.includes(t.roll));
+  const skipped=enrolled.filter(t=>existingRolls.includes(t.roll));
+  const totalAmt=toGen.reduce((a,t)=>a+(Number(t.amt)||0),0);
+
+  $('agTfPreview').innerHTML=`
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px">
+      <div style="background:#f0fdf4;border-radius:8px;padding:10px 12px;text-align:center">
+        <div style="font-size:10px;color:#15803d;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Generate Honge</div>
+        <div style="font-size:22px;font-weight:900;color:#0d3b1e;margin-top:3px">${toGen.length}</div>
+      </div>
+      <div style="background:#fef2f2;border-radius:8px;padding:10px 12px;text-align:center">
+        <div style="font-size:10px;color:#b91c1c;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Skip (already hai)</div>
+        <div style="font-size:22px;font-weight:900;color:#7f1d1d;margin-top:3px">${skipped.length}</div>
+      </div>
+      <div style="background:#eff6ff;border-radius:8px;padding:10px 12px;text-align:center">
+        <div style="font-size:10px;color:#1d4ed8;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Total Billing</div>
+        <div style="font-size:16px;font-weight:900;color:#1e3a8a;margin-top:3px">Rs ${fmt(totalAmt)}</div>
+      </div>
+    </div>
+    ${toGen.length===0?`<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:12px 14px;font-size:13px;color:#92400e;text-align:center">${enrolled.length===0?'⚠️ No students are enrolled in transport yet — assign at least one Transport Fee first.':'✅ Transport fee records for '+month+' already exist for all enrolled students.'}</div>`:`
+    <div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;max-height:200px;overflow-y:auto">
+      <div style="padding:7px 12px;background:#f9fafb;font-size:10px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #e5e7eb">Generate honge — ${month}</div>
+      ${toGen.map(t=>`
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #f3f4f6">
+          <div>
+            <div style="font-size:13px;font-weight:600">${t.student}</div>
+            <div style="font-size:11px;color:#6b7280">${t.roll} · ${t.route||'—'}</div>
+          </div>
+          <div style="font-size:13px;font-weight:700">Rs ${fmt(t.amt)}</div>
+        </div>`).join('')}
+    </div>`}
+    ${skipped.length>0?`<div style="margin-top:8px;padding:8px 12px;background:#f9fafb;border-radius:8px;font-size:12px;color:#6b7280">⏭ Skip hone wale: ${skipped.map(t=>t.student).join(', ')}</div>`:''}
+  `;
+  const btn=$('agTfConfirmBtn');
+  if(btn)btn.disabled=toGen.length===0;
+  if(btn)btn.textContent=toGen.length>0?`⚡ ${toGen.length} Students ki Transport Fee Generate Karein`:'Sab already exist karte hain';
+}
+function confirmAutoGenTf(){
+  if(!requirePerm('canEdit','auto generate transport fee'))return;
+  const month=($('agTfMonth')||{}).value;
+  const dueDay=parseInt(($('agTfDueDay')||{}).value)||10;
+  if(!month){toast('Please select a month');return;}
+  const enrolled=tfEnrolledStudents();
+  const existingRolls=D.transportFees.filter(t=>t.month===month).map(t=>t.roll);
+  const toGen=enrolled.filter(t=>!existingRolls.includes(t.roll));
+  if(toGen.length===0){toast('Sab already exist karte hain!');return;}
+
+  const [mName,yrStr]=month.split(' ');
+  const monthsArr=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const monthIdx=monthsArr.indexOf(mName);
+  const yr=parseInt(yrStr)||new Date().getFullYear();
+  const lastDay=new Date(yr,monthIdx+1,0).getDate();
+  const dueDate=ymd(new Date(yr,monthIdx,Math.min(dueDay,lastDay)));
+
+  toGen.forEach(t=>{
+    D.seq.tf=(D.seq.tf||0)+1;
+    D.transportFees.push({
+      tfId:'TF-'+D.seq.tf,
+      student:t.student,roll:t.roll,
+      route:t.route,routeId:t.routeId,
+      amt:Number(t.amt)||0,
+      month,dueDate,
+      status:'Pending',date:'-',method:'-',paidAmt:0,receipt:'-'
+    });
+  });
+  auditLog('action',`Auto-generated ${toGen.length} transport fee records for ${month}`);
+  buildTx();rTransportFee();rDash();rStudents();
+  closeMo('autoGenTf');
+  toast(`✅ ${toGen.length} students ki ${month} transport fee generate ho gayi!`);
 }
 
 
@@ -4289,11 +4631,10 @@ function saveFee(){
   // silently overwriting the previous one.
   if(isEdit && D.fees[editIdx] && D.fees[editIdx].isInstalment){
     const f=D.fees[editIdx];
-    // Final server-side-style guard: instalments must be paid in DUE-DATE
-    // order (not creation order), even if the disabled-field UI lock was
-    // somehow bypassed.
-    const earlierUnpaidSave=instEarlierUnpaid(instPlanRows(f),f);
-    if(earlierUnpaidSave){toast('⚠️ Collect the '+(earlierUnpaidSave.dueDate?'Rs '+fmt(earlierUnpaidSave.amt)+' instalment due '+earlierUnpaidSave.dueDate:'Instalment '+earlierUnpaidSave.instPart)+' first — instalments must be paid in due-date order');return;}
+    // Final server-side-style guard: instalments must be paid in order, even
+    // if the disabled-field UI lock was somehow bypassed.
+    const earlierUnpaidSave=instPlanRows(f).find(r=>(r.instIdx??0)<(f.instIdx??0)&&feeComputeStatus(r)!=='Paid');
+    if(earlierUnpaidSave){toast('⚠️ Collect Instalment '+earlierUnpaidSave.instPart+' first — instalments must be paid in order');return;}
     const already=feePaidAmt(f);
     let payNow=parseInt(($('fPayNow')||{}).value)||0;
     payNow=Math.max(0,Math.min(payNow, f.amt-already)); // never allow paid > payable
@@ -4768,17 +5109,16 @@ function openEditFee(idx){
     // e.g. after opening the record just to view/print a voucher — silently
     // recorded the whole instalment as paid even though nothing was collected.
     $('fPayNow').value='';
-    // Instalments must be collected in DUE-DATE order. If an earlier-due
-    // instalment in this plan is still unpaid, lock the payment field here
-    // too — this modal is reachable directly via the row's "Edit" button,
-    // not just quickCollect(), so the order guard has to live here as well,
-    // not only in quickCollect().
+    // Instalments must be collected IN ORDER. If an earlier instalment in this
+    // plan is still unpaid, lock the payment field here too — this modal is
+    // reachable directly via the row's "Edit" button, not just quickCollect(),
+    // so the order guard has to live here as well, not only in quickCollect().
     const planRowsEdit=instPlanRows(f);
-    const earlierUnpaidEdit=instEarlierUnpaid(planRowsEdit,f);
+    const earlierUnpaidEdit=planRowsEdit.find(r=>(r.instIdx??0)<(f.instIdx??0)&&feeComputeStatus(r)!=='Paid');
     if($('fPayNow')) $('fPayNow').disabled=!!earlierUnpaidEdit;
     if(earlierUnpaidEdit){
       const box=$('fPay-preview');
-      if(box){ box.style.color='var(--rd)'; box.textContent='⚠️ Collect the '+(earlierUnpaidEdit.dueDate?'instalment due '+earlierUnpaidEdit.dueDate:'Instalment '+earlierUnpaidEdit.instPart)+' first — instalments must be paid in due-date order.'; }
+      if(box){ box.style.color='var(--rd)'; box.textContent='⚠️ Collect Instalment '+earlierUnpaidEdit.instPart+' first — instalments must be paid in order.'; }
     }
     feePreviewPartial(); // fills Already Paid / Total Payable / preview + cap
     $('fst').value=feeComputeStatus(f)==='Paid'?'Paid':'Pending'; // kept in sync for saveFee's isEdit branch, but not shown
@@ -5125,12 +5465,10 @@ function printInstalmentVouchers(roll, planKey, mode){
     const isPaid=status==='Paid';
 
     // ── "Instalment X of Y" and "Previously Paid" are DERIVED, never stored ──
-    // `plan.rows` is already sorted by payment priority — due date, then
-    // instIdx tiebreak (see instPlanRows) — so this row's ordinal is its
-    // position in that plan and "previously paid" is the money received
-    // against every instalment that comes BEFORE it in due-date order.
-    // Nothing here is a literal: a 2-part plan says "1 of 2", a 6-part plan
-    // says "1 of 6".
+    // `plan.rows` is already sorted by instIdx (see instPlanRows), so this row's
+    // ordinal is its position in that plan and "previously paid" is the money
+    // received against every instalment that comes BEFORE it. Nothing here is a
+    // literal: a 2-part plan says "1 of 2", a 6-part plan says "1 of 6".
     const seat=plan.rows.indexOf(f);
     const ordinal=(seat>=0?seat:0)+1;
     const ofTotal=plan.rows.length;
@@ -6334,15 +6672,13 @@ function printVoucher(idx){
     const stripeSoft = copyType==='student' ? (isInstalment?'#eef2ff':'#ecfdf5') : copyType==='office' ? '#eff6ff' : '#f5f3ff';
     return `
 <div class="col">
-  <!-- HEADER — logo, institute name, and QR together at the top so the
-       scan target is immediately visible instead of buried mid-column. -->
+  <!-- HEADER -->
   <div style="display:flex;align-items:center;gap:7px;border-bottom:2px solid ${brand};padding-bottom:7px;margin-bottom:9px">
     <div style="width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,${brandDeep},${brand});display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#fff;flex-shrink:0;overflow:hidden">${getLogoBadgeInner()}</div>
     <div style="min-width:0;flex:1">
       <div style="font-size:11.5px;font-weight:800;color:${brandDeep};line-height:1.2">${D.settings.instName||''}</div>
       <div style="font-size:7px;color:#64748b">${D.settings.city||''} · AY ${academicYear}</div>
     </div>
-    <div class="qr-slot" data-qr="${qrPayload}" style="width:34px;height:34px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
   </div>
   <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:10px;flex-wrap:wrap">
     <span style="background:${stripeSoft};color:${stripeClr};font-size:7.5px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:10px;text-transform:uppercase">${copyLabel}</span>
@@ -6377,6 +6713,11 @@ function printVoucher(idx){
   </table>
 
   <div style="font-size:7.5px;color:#64748b;margin-bottom:9px">Issued ${todayFmt} · Due <strong style="color:${isOverdue?'#b91c1c':'#0f172a'}">${dueFmt}</strong> · Expires ${expiryFmt}</div>
+
+  <!-- QR -->
+  <div style="text-align:center;margin-bottom:9px">
+    <div class="qr-slot" data-qr="${qrPayload}" style="width:44px;height:44px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin:0 auto;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
+  </div>
 
   <!-- PAYMENT INSTRUCTIONS -->
   <div style="background:#f8fafc;border-radius:8px;padding:8px 9px;margin-bottom:9px">
@@ -6596,7 +6937,6 @@ function printTransportVoucher(idx, mode){
       <div style="font-size:11.5px;font-weight:800;color:${brandDeep};line-height:1.2">${D.settings.instName||''}</div>
       <div style="font-size:7px;color:#64748b">${D.settings.city||''} · AY ${academicYear}</div>
     </div>
-    <div class="qr-slot" data-qr="${qrPayload}" style="width:34px;height:34px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
   </div>
   <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:10px;flex-wrap:wrap">
     <span style="background:${stripeSoft};color:${stripeClr};font-size:7.5px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:10px;text-transform:uppercase">${copyLabel}</span>
@@ -6631,6 +6971,10 @@ function printTransportVoucher(idx, mode){
   </table>
 
   <div style="font-size:7.5px;color:#64748b;margin-bottom:9px">Issued ${todayFmt} · Due <strong style="color:${isOverdue?'#b91c1c':'#0f172a'}">${dueFmt}</strong></div>
+
+  <div style="text-align:center;margin-bottom:9px">
+    <div class="qr-slot" data-qr="${qrPayload}" style="width:44px;height:44px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin:0 auto;display:flex;align-items:center;justify-content:center;overflow:hidden"></div>
+  </div>
 
   <div style="background:#f8fafc;border-radius:8px;padding:8px 9px;margin-bottom:9px">
     <div style="font-size:7px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:${stripeClr};margin-bottom:4px">Payment Instructions</div>
@@ -6893,18 +7237,15 @@ function quickCollect(idx){
   const stu=D.students.find(s=>s.roll===f.roll);
   if(!stu){ toast('Student not found'); return; }
 
-  // Instalments must be collected in DUE-DATE order — an earlier-due
-  // instalment left unpaid while a later one gets collected is exactly how
-  // a plan can show "2/2 paid" with 1/2 still overdue. Block collecting any
-  // instalment that still has an earlier-due (or same-date, lower instIdx),
-  // unpaid instalment ahead of it. Editing a due date re-ranks this
-  // automatically since instPlanRows/instEarlierUnpaid always read the
-  // current dueDate, never a cached order.
+  // Instalments must be collected IN ORDER — an earlier instalment left
+  // unpaid while a later one gets collected is exactly how a plan can show
+  // "2/2 paid" with 1/2 still overdue. Block collecting any instalment that
+  // still has an earlier (lower instIdx), unpaid instalment ahead of it.
   if(f.isInstalment){
     const planRows=instPlanRows(f);
-    const earlierUnpaid=instEarlierUnpaid(planRows,f);
+    const earlierUnpaid=planRows.find(r=>(r.instIdx??0)<(f.instIdx??0)&&feeComputeStatus(r)!=='Paid');
     if(earlierUnpaid){
-      toast('⚠️ Collect the '+(earlierUnpaid.dueDate?'instalment due '+earlierUnpaid.dueDate:'Instalment '+earlierUnpaid.instPart)+' first — instalments must be paid in due-date order');
+      toast('⚠️ Collect Instalment '+earlierUnpaid.instPart+' first — instalments must be paid in order');
       return;
     }
   }
@@ -8078,9 +8419,11 @@ function rReports(){
     var m=toMonthLabel(f.date);
     if(m&&incomeMap.hasOwnProperty(m))incomeMap[m]+=amt;
   });
-  fTransportFees.filter(t=>t.status==='Paid').forEach(t=>{
+  fTransportFees.forEach(t=>{
+    var amt=tfPaidAmt(t);
+    if(!amt)return;
     var m=toMonthLabel(t.date);
-    if(m&&incomeMap.hasOwnProperty(m))incomeMap[m]+=t.amt;
+    if(m&&incomeMap.hasOwnProperty(m))incomeMap[m]+=amt;
   });
 
   // Build expenses per month (cash expenses + paid salaries)
@@ -8130,7 +8473,7 @@ function rpShow(type){
   document.querySelectorAll('#rpCards .rc').forEach(c=>c.classList.remove('on'));
   var activeCard=$('rc-'+type.replace('-boys','').replace('-girls',''));
   if(activeCard) activeCard.classList.add('on');
-  const titles={fee:'Fee Collection Report',salary:'Salary Report',expense:'Expense Report',balance:'Balance Sheet',student:'Student Ledger',annual:'Annual Report','fee-boys':'Boys Fee Collection Report','fee-girls':'Girls Fee Collection Report','student-boys':'Boys Student Ledger','student-girls':'Girls Student Ledger'};
+  const titles={fee:'Fee Collection Report',salary:'Salary Report',expense:'Expense Report',balance:'Balance Sheet',student:'Student Ledger',annual:'Annual Report',transport:'Transport Report','fee-boys':'Boys Fee Collection Report','fee-girls':'Girls Fee Collection Report','student-boys':'Boys Student Ledger','student-girls':'Girls Student Ledger'};
 
   // Date filter label — title mein show karo
   var fLabel='';
@@ -8148,7 +8491,7 @@ function rpShow(type){
   // total below so Reports match the Dashboard's fee-inclusive numbers.
   const filteredTransportFees=D.transportFees.filter(t=>_rpDateInRange(t.date));
 
-  const income=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
+  const income=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+filteredTransportFees.reduce((a,b)=>a+tfPaidAmt(b),0);
   const expTot=filteredExpenses.reduce((a,b)=>a+b.amt,0);
   const salTot=filteredSalaries.filter(s=>s.status==='Paid').reduce((a,b)=>a+netPay(b),0);
   const allExp=expTot+salTot;
@@ -8169,7 +8512,7 @@ function rpShow(type){
       const feeBillFor = (stuArr)=>filteredFees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+b.amt,0);
       // Transport Fee also belongs to boys and girls both, so split it the
       // same way (matched by roll) instead of leaving it out of this report.
-      const tfCollFor = (stuArr)=>filteredTransportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&stuArr.includes(s)&&t.status==='Paid';}).reduce((a,b)=>a+b.amt,0);
+      const tfCollFor = (stuArr)=>filteredTransportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+tfPaidAmt(b),0);
       const tfBillFor = (stuArr)=>filteredTransportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+b.amt,0);
       const boysInterCnt=boysInter.length, girlsInterCnt=girlsInter.length, bsCnt=bsStu.length;
       return secHead('Intermediate — Boys ('+boysInterCnt+' students)')+
@@ -8191,8 +8534,8 @@ function rpShow(type){
         row('Total Students',D.students.length)+
         row('Total Billed (incl. Transport)','Rs '+fmt(filteredFees.reduce((a,b)=>a+b.amt,0)+filteredTransportFees.reduce((a,b)=>a+b.amt,0)))+
         row('Collected','<span class="pos">Rs '+fmt(income)+'</span>')+
-        row('— of which Transport Fee','Rs '+fmt(filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0)))+
-        row('Pending/Overdue','<span class="neg">Rs '+fmt(filteredFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+filteredTransportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0))+'</span>');
+        row('— of which Transport Fee','Rs '+fmt(filteredTransportFees.reduce((a,b)=>a+tfPaidAmt(b),0)))+
+        row('Pending/Overdue','<span class="neg">Rs '+fmt(filteredFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+filteredTransportFees.reduce((a,b)=>a+tfRemainingAmt(b),0))+'</span>');
     })(),
     salary:(()=>{
       const net=s=>netPay(s);
@@ -8448,7 +8791,7 @@ function rpShow(type){
       // ── 2. Income Breakdown (Fee Collection) ──
       h+=secHead('💳 Income Breakdown (Fee Collection)');
       const feeBilled=filteredFees.reduce((a,b)=>a+b.amt,0)+filteredTransportFees.reduce((a,b)=>a+b.amt,0);
-      const feePending=filteredFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+filteredTransportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0);
+      const feePending=filteredFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+filteredTransportFees.reduce((a,b)=>a+tfRemainingAmt(b),0);
       const collRate=feeBilled>0?(income/feeBilled*100):0;
       h+=row('Fee Billed (incl. Transport)','Rs '+fmt(feeBilled));
       h+=row('Fee Collected','<span class="pos">Rs '+fmt(income)+'</span>');
@@ -8502,7 +8845,7 @@ function rpShow(type){
         return bMMap[lbl];
       };
       filteredFees.forEach(f=>feePaidByReceipt(f,(amt,ds)=>{const b=bMBucket(ds);if(b)b.inc+=amt;}));
-      filteredTransportFees.filter(t=>t.status==='Paid').forEach(t=>{const b=bMBucket(t.date);if(b)b.inc+=t.amt;});
+      filteredTransportFees.forEach(t=>{const amt=tfPaidAmt(t);if(amt<=0)return;const b=bMBucket(t.date);if(b)b.inc+=amt;});
       filteredExpenses.forEach(e=>{const b=bMBucket(e.date);if(b)b.exp+=e.amt;});
       filteredSalaries.filter(s=>s.status==='Paid').forEach(s=>{const b=s.month?bMBucket('1 '+s.month):null;if(b)b.exp+=netPay(s);});
       const bMKeys=Object.keys(bMMap).sort((a,b)=>bMMap[a].ts-bMMap[b].ts);
@@ -8566,8 +8909,8 @@ function rpShow(type){
       // broke that identity for every scholarship student and understated the
       // collection rate.
       const feeBilled=filteredFees.reduce((a,b)=>a+b.amt,0)+filteredTransportFees.reduce((a,b)=>a+b.amt,0);
-      const feeCollected=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
-      const feePending=filteredFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+filteredTransportFees.filter(t=>t.status!=='Paid').reduce((a,b)=>a+b.amt,0);
+      const feeCollected=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+filteredTransportFees.reduce((a,b)=>a+tfPaidAmt(b),0);
+      const feePending=filteredFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+filteredTransportFees.reduce((a,b)=>a+tfRemainingAmt(b),0);
       const collRate=feeBilled>0?(feeCollected/feeBilled*100):0;
 
       // ── Salary numbers ──
@@ -8602,8 +8945,9 @@ function rpShow(type){
         return mMap[lbl];
       };
       filteredFees.forEach(f=>feePaidByReceipt(f,(amt,ds)=>{const b=mBucket(ds);if(b)b.inc+=amt;}));
-      filteredTransportFees.filter(t=>t.status==='Paid').forEach(t=>{
-        const b=mBucket(t.date);if(b)b.inc+=t.amt;
+      filteredTransportFees.forEach(t=>{
+        const amt=tfPaidAmt(t);if(amt<=0)return;
+        const b=mBucket(t.date);if(b)b.inc+=amt;
       });
       filteredExpenses.forEach(e=>{
         const b=mBucket(e.date);if(b)b.exp+=e.amt;
@@ -8685,12 +9029,64 @@ function rpShow(type){
 
       return html;
     })(),
+    transport: (()=>{
+      // Group by routeId when the record is linked to Route Master (current
+      // vehicle/driver/capacity looked up live), falling back to the plain
+      // route name for legacy/custom records with no routeId — so a route
+      // later renamed or removed doesn't silently merge into "Unassigned".
+      const groups={};
+      filteredTransportFees.forEach(t=>{
+        const key=t.routeId||('name:'+(t.route||'Unassigned'));
+        if(!groups[key]) groups[key]={route:D.routes.find(r=>r.routeId===t.routeId)||null, name:t.route||'Unassigned', recs:[]};
+        groups[key].recs.push(t);
+      });
+      const groupArr=Object.values(groups).sort((a,b)=>{
+        const bBill=b.recs.reduce((x,y)=>x+(Number(y.amt)||0),0);
+        const aBill=a.recs.reduce((x,y)=>x+(Number(y.amt)||0),0);
+        return bBill-aBill;
+      });
+      let html=secHead('🚌 Route-wise / Vehicle-wise Revenue');
+      if(!groupArr.length){
+        html+=row('No transport fee records found','—');
+      }else{
+        groupArr.forEach(g=>{
+          const billed=g.recs.reduce((a,b)=>a+(Number(b.amt)||0),0);
+          const collected=g.recs.reduce((a,b)=>a+tfPaidAmt(b),0);
+          const pending=g.recs.reduce((a,b)=>a+tfRemainingAmt(b),0);
+          const studentCnt=new Set(g.recs.map(r=>r.roll)).size;
+          const vehLine=g.route?[g.route.vehicleNo,g.route.driverName,g.route.capacity?g.route.capacity+' seats':''].filter(Boolean).join(' · '):'Not in Route Master';
+          html+=`<div style="padding:10px 0;border-bottom:1px solid var(--s1)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
+              <span style="font-size:13px;font-weight:700;color:var(--s6)">🚐 ${g.route?g.route.name:g.name}</span>
+              <span style="font-size:12px;font-weight:700">Rs ${fmt(collected)}<span style="font-size:10px;color:var(--s4);font-weight:400"> collected</span></span>
+            </div>
+            <div style="font-size:10.5px;color:var(--s4);margin-bottom:4px">${vehLine} · ${studentCnt} student${studentCnt!==1?'s':''}</div>
+            <div style="display:flex;gap:14px;font-size:11px;color:var(--s5)">
+              <span>Billed: <strong>Rs ${fmt(billed)}</strong></span>
+              <span>✅ Collected: <strong style="color:var(--g6)">Rs ${fmt(collected)}</strong></span>
+              ${pending>0?'<span>⏳ Pending: <strong style="color:#f59e0b">Rs '+fmt(pending)+'</strong></span>':''}
+            </div>
+          </div>`;
+        });
+      }
+      const totBilled=filteredTransportFees.reduce((a,b)=>a+(Number(b.amt)||0),0);
+      const totCollected=filteredTransportFees.reduce((a,b)=>a+tfPaidAmt(b),0);
+      const totPending=filteredTransportFees.reduce((a,b)=>a+tfRemainingAmt(b),0);
+      const totStudents=new Set(filteredTransportFees.map(t=>t.roll)).size;
+      html+=secHead('Overall Summary');
+      html+=row('Total Routes',D.routes.length+' route(s) in Master');
+      html+=row('Students Using Transport',totStudents);
+      html+=row('Total Billed','Rs '+fmt(totBilled));
+      html+=row('Collected','<span class="pos">Rs '+fmt(totCollected)+'</span>');
+      html+=row('Pending/Overdue','<span class="neg">Rs '+fmt(totPending)+'</span>');
+      return html;
+    })(),
   };
   // Boys/Girls specific report data helpers
   const feeCollFor = (stuArr) => filteredFees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+feePaidAmt(b),0);
   const feeBillFor = (stuArr) => filteredFees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+b.amt,0);
   // Transport Fee split the same way — it's used by boys and girls both.
-  const tfCollFor2 = (stuArr) => filteredTransportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&stuArr.includes(s)&&t.status==='Paid';}).reduce((a,b)=>a+b.amt,0);
+  const tfCollFor2 = (stuArr) => filteredTransportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+tfPaidAmt(b),0);
   const tfBillFor2 = (stuArr) => filteredTransportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&stuArr.includes(s);}).reduce((a,b)=>a+b.amt,0);
   const boysStu    = D.students.filter(s=>s.gender==='Male');
   const girlsStu   = D.students.filter(s=>s.gender==='Female');
@@ -8969,7 +9365,7 @@ function exportReport(format){
       var myFees=filteredFees.filter(f=>f.roll===s.roll);
       var paid=myFees.reduce((a,b)=>a+feePaidAmt(b),0);
       var relief=myFees.reduce((a,b)=>a+feeDiscountAmt(b),0);
-      var tfPaid=filteredTransportFees.filter(t=>t.roll===s.roll&&t.status==='Paid').reduce((a,b)=>a+b.amt,0);
+      var tfPaid=filteredTransportFees.filter(t=>t.roll===s.roll).reduce((a,b)=>a+tfPaidAmt(b),0);
       var tfBilled=filteredTransportFees.filter(t=>t.roll===s.roll).reduce((a,b)=>a+b.amt,0);
       var billed=myFees.reduce((a,f)=>a+(f.amt||0),0)+tfBilled;
       return[s.name,s.roll,s.cls||'',s.gender||'',billed,relief,paid,tfPaid,Math.max(0,billed-paid-tfPaid),feeStatusLabel(studentFeeStatus(s))];
@@ -8984,7 +9380,7 @@ function exportReport(format){
     rows=filteredExpenses.map(e=>[e.desc,e.cat,e.amt,e.date,e.approver,e.status]);
     colWidths=[35,18,14,14,18,12];
   } else if(type==='balance'){
-    var tfInc=filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
+    var tfInc=filteredTransportFees.reduce((a,b)=>a+tfPaidAmt(b),0);
     var inc=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+tfInc;
     var salExp=filteredSalaries.filter(s=>s.status==='Paid').reduce((a,b)=>a+netPay(b),0);
     var othExp=filteredExpenses.reduce((a,b)=>a+b.amt,0);
@@ -9005,7 +9401,7 @@ function exportReport(format){
   } else if(type==='annual'){
     // Multi-section annual export
     headers=['Section','Item','Value'];
-    var aTfInc=filteredTransportFees.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
+    var aTfInc=filteredTransportFees.reduce((a,b)=>a+tfPaidAmt(b),0);
     var aInc=filteredFees.reduce((a,b)=>a+feePaidAmt(b),0)+aTfInc;
     var aSal=filteredSalaries.filter(s=>s.status==='Paid').reduce((a,b)=>a+netPay(b),0);
     var aExp=filteredExpenses.reduce((a,b)=>a+b.amt,0);
@@ -9053,8 +9449,9 @@ function exportReport(format){
       if(rest<=0)return;
       var k=mKeyOf(f.date);if(k)mBucket(k).inc+=rest;
     });
-    filteredTransportFees.filter(t=>t.status==='Paid').forEach(t=>{
-      var k=mKeyOf(t.date);if(k)mBucket(k).inc+=t.amt;
+    filteredTransportFees.forEach(t=>{
+      var amt=tfPaidAmt(t);if(!amt)return;
+      var k=mKeyOf(t.date);if(k)mBucket(k).inc+=amt;
     });
     filteredExpenses.forEach(e=>{
       var k=mKeyOf(e.date);if(k)mBucket(k).exp+=e.amt;
@@ -9777,12 +10174,12 @@ function renderNotifications(){
   // Transport Fee has its own Pending/Overdue lifecycle, separate from the
   // student's overall fee status — so it needs its own alert too, or an
   // overdue transport-only balance would never surface here.
-  const overdueTf=D.transportFees.filter(t=>t.status==='Overdue');
+  const overdueTf=D.transportFees.filter(t=>tfRemainingAmt(t)>0&&tfComputeStatus(t).indexOf('Overdue')>=0);
   if(overdueTf.length){
-    const amt=overdueTf.reduce((a,t)=>a+t.amt,0);
+    const amt=overdueTf.reduce((a,t)=>a+tfRemainingAmt(t),0);
     items.push({icon:'🚌',bg:'#fff1f1',label:overdueTf.length+' transport fee'+(overdueTf.length!==1?'s':'')+' overdue',sub:'Rs '+fmt(amt)+' due',go:()=>goTo('transportFee',document.querySelector('.ni[onclick*=transportFee]'))});
   }
-  const pendingTf=D.transportFees.filter(t=>t.status==='Pending');
+  const pendingTf=D.transportFees.filter(t=>tfRemainingAmt(t)>0&&tfComputeStatus(t).indexOf('Overdue')<0);
   if(pendingTf.length){
     items.push({icon:'🚌',bg:'#fffbeb',label:pendingTf.length+' pending transport fee'+(pendingTf.length!==1?'s':''),sub:'Tap to review',go:()=>goTo('transportFee',document.querySelector('.ni[onclick*=transportFee]'))});
   }
@@ -9840,12 +10237,17 @@ function rDash(){
   // Transport Fee is its own module (D.transportFees) but is still real
   // college income, so it must be folded into the dashboard's fee totals
   // (progress bar, this-month collected, pending/overdue, balance summary).
-  const tfPaidRecs = D.transportFees.filter(t=>t.status==='Paid');
-  const tfPendRecs = D.transportFees.filter(t=>t.status==='Pending');
-  const tfOverRecs = D.transportFees.filter(t=>t.status==='Overdue');
-  const fPaid  = D.fees.reduce((a,b)=>a+feePaidAmt(b),0) + tfPaidRecs.reduce((a,b)=>a+b.amt,0);
-  const fPend  = pend.reduce((a,b)=>a+feeRemainingAmt(b),0) + tfPendRecs.reduce((a,b)=>a+b.amt,0);
-  const fOver  = over.reduce((a,b)=>a+feeRemainingAmt(b),0) + tfOverRecs.reduce((a,b)=>a+b.amt,0);
+  // Paid/Pending/Overdue records derived the same way as fees (tfPaidAmt/
+  // tfRemainingAmt/tfComputeStatus), so a partially-paid transport record
+  // contributes its paid portion to "collected" AND its true remaining
+  // balance to "pending/overdue" — same rule as the D.fees section above.
+  const tfPaidRecs = D.transportFees.filter(t=>tfPaidAmt(t)>0);
+  const tfOutstandingTf = D.transportFees.filter(t=>tfRemainingAmt(t)>0);
+  const tfPendRecs = tfOutstandingTf.filter(t=>tfComputeStatus(t).indexOf('Overdue')<0);
+  const tfOverRecs = tfOutstandingTf.filter(t=>tfComputeStatus(t).indexOf('Overdue')>=0);
+  const fPaid  = D.fees.reduce((a,b)=>a+feePaidAmt(b),0) + D.transportFees.reduce((a,b)=>a+tfPaidAmt(b),0);
+  const fPend  = pend.reduce((a,b)=>a+feeRemainingAmt(b),0) + tfPendRecs.reduce((a,b)=>a+tfRemainingAmt(b),0);
+  const fOver  = over.reduce((a,b)=>a+feeRemainingAmt(b),0) + tfOverRecs.reduce((a,b)=>a+tfRemainingAmt(b),0);
   const fTotal = D.fees.reduce((a,b)=>a+b.amt,0) + D.transportFees.reduce((a,b)=>a+b.amt,0);
   const totExp = D.expenses.reduce((a,b)=>a+b.amt,0);
   const totSal = D.salaries.filter(s=>s.status==='Paid').reduce((a,b)=>a+netPay(b),0);
@@ -9889,7 +10291,7 @@ function rDash(){
     if(rest>0 && inThisMonth(f.date)){ feeThisMonth+=rest; feeReceipts++; }
   });
   const tfPaidThisMonth = tfPaidRecs.filter(t=>inThisMonth(t.date));
-  const fPaidThisMonth = feeThisMonth + tfPaidThisMonth.reduce((a,b)=>a+b.amt,0);
+  const fPaidThisMonth = feeThisMonth + tfPaidThisMonth.reduce((a,b)=>a+tfPaidAmt(b),0);
   $('db-f').textContent = 'Rs '+fmt(fPaidThisMonth);
   if($('db-f-sub')) $('db-f-sub').innerHTML = `<span style="color:var(--g6)">+${feeReceipts+tfPaidThisMonth.length} receipts this month</span>`;
 
@@ -9922,7 +10324,7 @@ function rDash(){
       const stus=D.students.filter(p.filter);
       const feesForStus=D.fees.filter(f=>stus.some(s=>s.roll===f.roll));
       const tfForStus=D.transportFees.filter(t=>stus.some(s=>s.roll===t.roll));
-      const paidAmt=feesForStus.reduce((a,b)=>a+feePaidAmt(b),0)+tfForStus.filter(t=>t.status==='Paid').reduce((a,b)=>a+b.amt,0);
+      const paidAmt=feesForStus.reduce((a,b)=>a+feePaidAmt(b),0)+tfForStus.reduce((a,b)=>a+tfPaidAmt(b),0);
       const totAmt=feesForStus.reduce((a,b)=>a+b.amt,0)+tfForStus.reduce((a,b)=>a+b.amt,0);
       const pp=totAmt>0?Math.round((paidAmt/totAmt)*100):0;
       const cnt=stus.length;
@@ -9957,11 +10359,11 @@ function rDash(){
   // part-paid-but-overdue instalment still raises the alert.
   const overdueRolls = new Set([
     ...D.fees.filter(f=>feeRemainingAmt(f)>0&&feeComputeStatus(f).indexOf('Overdue')>=0).map(f=>f.roll),
-    ...D.transportFees.filter(t=>t.status==='Overdue').map(t=>t.roll)
+    ...D.transportFees.filter(t=>tfRemainingAmt(t)>0&&tfComputeStatus(t).indexOf('Overdue')>=0).map(t=>t.roll)
   ]);
   const pendingRolls = new Set([
     ...D.fees.filter(f=>feeRemainingAmt(f)>0&&feeComputeStatus(f).indexOf('Overdue')<0).map(f=>f.roll),
-    ...D.transportFees.filter(t=>t.status==='Pending').map(t=>t.roll)
+    ...D.transportFees.filter(t=>tfRemainingAmt(t)>0&&tfComputeStatus(t).indexOf('Overdue')<0).map(t=>t.roll)
   ]);
   const overdueStudents = D.students.filter(s=>overdueRolls.has(s.roll));
   const pendingStudents = D.students.filter(s=>pendingRolls.has(s.roll) && !overdueRolls.has(s.roll));
@@ -9982,8 +10384,8 @@ function rDash(){
         // rows (some Paid, some Pending, some part-paid), so summing f.amt
         // across them would overstate what is really outstanding.
         const stuOverdueFees=D.fees.filter(f=>f.roll===s.roll && feeRemainingAmt(f)>0 && feeComputeStatus(f).indexOf('Overdue')>=0);
-        const stuOverdueTf=D.transportFees.filter(t=>t.roll===s.roll && t.status==='Overdue');
-        const overdueAmt=(stuOverdueFees.length||stuOverdueTf.length) ? (stuOverdueFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+stuOverdueTf.reduce((a,b)=>a+b.amt,0)) : s.fee;
+        const stuOverdueTf=D.transportFees.filter(t=>t.roll===s.roll && tfRemainingAmt(t)>0 && tfComputeStatus(t).indexOf('Overdue')>=0);
+        const overdueAmt=(stuOverdueFees.length||stuOverdueTf.length) ? (stuOverdueFees.reduce((a,b)=>a+feeRemainingAmt(b),0)+stuOverdueTf.reduce((a,b)=>a+tfRemainingAmt(b),0)) : s.fee;
         return `<div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px;background:#fff1f1;border:1px solid #fecaca;margin-bottom:6px">
           <div style="width:32px;height:32px;border-radius:50%;background:var(--rd);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;flex-shrink:0">${s.name[0]}</div>
           <div style="flex:1;min-width:0">
@@ -10018,9 +10420,9 @@ function rDash(){
   _dbDrawIncomeChart();
   const isInterStuPie=s=>(s.cls||'').startsWith('Inter-');
   const interBoysIncome = D.fees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&isInterStuPie(s)&&s.gender==='Male';}).reduce((a,b)=>a+feePaidAmt(b),0)
-    + D.transportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&isInterStuPie(s)&&s.gender==='Male'&&t.status==='Paid';}).reduce((a,b)=>a+b.amt,0);
+    + D.transportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&isInterStuPie(s)&&s.gender==='Male';}).reduce((a,b)=>a+tfPaidAmt(b),0);
   const interGirlsIncome= D.fees.filter(f=>{const s=D.students.find(s=>s.roll===f.roll);return s&&isInterStuPie(s)&&s.gender==='Female';}).reduce((a,b)=>a+feePaidAmt(b),0)
-    + D.transportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&isInterStuPie(s)&&s.gender==='Female'&&t.status==='Paid';}).reduce((a,b)=>a+b.amt,0);
+    + D.transportFees.filter(t=>{const s=D.students.find(s=>s.roll===t.roll);return s&&isInterStuPie(s)&&s.gender==='Female';}).reduce((a,b)=>a+tfPaidAmt(b),0);
   mkChart('ch-pie','doughnut',{
     labels:['Inter Boys Fee','Inter Girls Fee','Expenses','Salaries'],
     datasets:[{data:[interBoysIncome,interGirlsIncome,totExp,totSalAll],backgroundColor:[C.b,'#8b5cf6',C.o,'#f59e0b'],borderWidth:2,borderColor:'#fff'}]
@@ -10166,37 +10568,10 @@ function instPlanKey(f){
 function sameInstPlan(a,b){
   return a.roll===b.roll && instPlanKey(a)===instPlanKey(b);
 }
-// ── Payment-priority ordering ─────────────────────────────────────────
-// Instalments are collected in DUE-DATE order, not creation order. Earlier
-// due date always has priority; when two instalments share the same due
-// date, the lower instIdx (the one created first) breaks the tie. This is
-// the single source of truth for "which instalment comes first" — plan
-// display, voucher ordinals AND the payment-order guard all read from it —
-// so editing a due date automatically re-ranks priority everywhere at once.
-// A missing/unparseable due date sorts last (Infinity): we can't tell where
-// it belongs, so it never jumps ahead of instalments that do have one.
-function instDueTime(f){
-  const t=f&&f.dueDate?parseDate(f.dueDate).getTime():NaN;
-  return isFinite(t)?t:Infinity;
-}
-function instPayPriorityCmp(a,b){
-  const d=instDueTime(a)-instDueTime(b);
-  if(d!==0) return d;
-  return (a.instIdx??0)-(b.instIdx??0);
-}
-// All instalment rows belonging to the same plan as fee record `f`,
-// ordered by payment priority (due date, then instIdx tiebreak).
+// All instalment rows belonging to the same plan as fee record `f`.
 function instPlanRows(f){
   return D.fees.filter(x=>x.isInstalment&&sameInstPlan(x,f))
-    .sort(instPayPriorityCmp);
-}
-// The instalment (if any) that must be cleared before `f` can be paid:
-// any OTHER row in the same plan that has payment priority ahead of `f`
-// (earlier due date, or same due date + lower instIdx) and is not yet
-// fully cleared (remaining_amount > 0 — Pending, Overdue, or Partial all
-// count). Returns undefined when `f` is next in line or already paid.
-function instEarlierUnpaid(planRows,f){
-  return planRows.find(r=>r!==f&&instPayPriorityCmp(r,f)<0&&feeComputeStatus(r)!=='Paid');
+    .sort((a,b)=>(a.instIdx??0)-(b.instIdx??0));
 }
 function instPlanSummary(f){
   const rows=instPlanRows(f);
