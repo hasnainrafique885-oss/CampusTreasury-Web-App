@@ -91,10 +91,23 @@ const D = {
   // Each route has its own vehicle, driver and a fixed monthly fee, which
   // the Transport Fee assignment picks from instead of typing the same
   // route name and amount by hand every single time.
+  // `fitnessExpiry` / `insuranceExpiry` (optional, yyyy-mm-dd) let the Route
+  // Master flag a vehicle whose fitness certificate or insurance is expired
+  // or expiring soon, the same way Fee/Salary already flag overdue money —
+  // documentation is treated as a first-class expiry, not just a memo field.
   routes:[
-    {routeId:'RT-1', name:'Model Town → Campus', vehicleNo:'LES-4521', driverName:'Ahmed Khan', driverPhone:'0300-1234567', capacity:40, monthlyFee:2500, status:'Active'},
-    {routeId:'RT-2', name:'Johar Town → Campus', vehicleNo:'LEB-7788', driverName:'Bilal Ahmed', driverPhone:'0301-9876543', capacity:35, monthlyFee:2500, status:'Active'},
+    {routeId:'RT-1', name:'Model Town → Campus', vehicleNo:'LES-4521', driverName:'Ahmed Khan', driverPhone:'0300-1234567', capacity:40, monthlyFee:2500, status:'Active', fitnessExpiry:'2026-11-15', insuranceExpiry:'2026-09-20'},
+    {routeId:'RT-2', name:'Johar Town → Campus', vehicleNo:'LEB-7788', driverName:'Bilal Ahmed', driverPhone:'0301-9876543', capacity:35, monthlyFee:2500, status:'Active', fitnessExpiry:'2027-02-01', insuranceExpiry:'2026-12-10'},
   ],
+  // ── Transport Status (Pause / Discontinue) ── keyed by roll number.
+  // A student with no entry here is simply "Active" (the default). This is
+  // intentionally SEPARATE from the transport fee records themselves so that
+  // pausing/stopping a student never touches already-issued vouchers or
+  // history — it only changes what Auto-Generate and the seat-utilization
+  // count do going forward.
+  //   {status:'Paused', from:'September 2026', until:'November 2026', reason:'...'}
+  //   {status:'Stopped', reason:'...'}
+  transportStatus:{},
   // ── Transport Fee module ── own record set, kept separate from the
   // general Tuition fee, since only some students actually use the
   // college transport/van — not everyone gets one. Has its own
@@ -108,6 +121,13 @@ const D = {
     {tfId:'TF-1', student:'Kamran Ali', roll:'B-FSE-2024-01', route:'Model Town → Campus', routeId:'RT-1', amt:2500, date:'-', method:'-', receipt:'-', status:'Overdue', dueDate:'2025-01-05'},
     {tfId:'TF-2', student:'Hina Bashir', roll:'G-ICS-2024-01', route:'Johar Town → Campus', routeId:'RT-2', amt:2500, date:'3 Jan 2025', method:'Cash', receipt:'TFR-2001', status:'Paid', dueDate:'2025-01-10'},
   ],
+  // ── Transport Status ── keyed by student roll. A student who stops using
+  // the van for a while (exams at home, temporary own arrangement, etc.) or
+  // for good shouldn't have to be re-typed out of Auto-Generate by hand every
+  // month — this is the single source of truth Auto-Generate and the seat
+  // count both check before treating someone as "currently riding".
+  // {status:'Paused'|'Stopped', untilLabel:'November 2026', untilNum:<sortable>, reason:'', setOn:'DD Mon YYYY'}
+  transportStatus:{},
   increments:[],
   leaves:[],
   classes:[
@@ -541,6 +561,10 @@ if(!D.settings||typeof D.settings!=='object') D.settings={};
 Object.keys(_SETTINGS_DEFAULTS).forEach(k=>{
   if(D.settings[k]===undefined||D.settings[k]===null||D.settings[k]==='') D.settings[k]=_SETTINGS_DEFAULTS[k];
 });
+// A saved copy from before this feature existed won't have transportStatus
+// at all (loadPersistedData only overwrites keys present in the save file),
+// but guard it anyway in case a corrupted/older backup is restored later.
+if(!D.transportStatus||typeof D.transportStatus!=='object') D.transportStatus={};
 // The ledger is DERIVED data, but saveData() serialises the whole of D, so a
 // stale D.tx comes back with the restored state. Rebuild it from the freshly
 // loaded records — otherwise the buildTx() call above (which ran against the
@@ -2793,7 +2817,7 @@ function viewEmp(idx){
     </div>
     <div style="border-top:1.5px solid var(--s2);padding-top:14px;margin-bottom:10px">
       <div style="font-size:12px;font-weight:700;color:var(--s5);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px">📊 Salary History (${history.length} records)</div>
-      ${history.length===0?`<div style="text-align:center;padding:20px;color:var(--s4);font-size:13px">Koi salary record nahi mila</div>`:`
+      ${history.length===0?`<div style="text-align:center;padding:20px;color:var(--s4);font-size:13px">No salary records found</div>`:`
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
         <div style="background:#f0fdf4;border-radius:8px;padding:10px 12px;text-align:center">
           <div style="font-size:10px;color:#15803d;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Total Paid</div>
@@ -3600,7 +3624,7 @@ function delFine(idx){
    own Pending/Overdue/Paid lifecycle and its own
    dedicated printable voucher (see printTransportVoucher).
 ══════════════════════════════════════════════════ */
-let TFF={q:'',st:'',gn:'',cls:'',sec:'',route:''};
+let TFF={q:'',st:'',gn:'',cls:'',sec:'',route:'',month:''};
 let _tfSelectedStu=null;
 
 function rTransportFee(){
@@ -3615,17 +3639,45 @@ function rTransportFee(){
       &&(!TFF.gn||!stu||(stu.gender||'')===TFF.gn)
       &&(!TFF.cls||!stu||stu.cls===TFF.cls)
       &&(!TFF.sec||!stu||stu.section===TFF.sec)
-      &&(!TFF.route||t.route===TFF.route);
+      &&(!TFF.route||t.route===TFF.route)
+      &&(!TFF.month||tfRecordMonth(t)===TFF.month);
+  })
+  // Newest month/due-date first — a freshly Auto-Generated batch should be
+  // the first thing the admin sees, not buried at the bottom below every
+  // older record. Falls back to insertion order if a due date is missing.
+  .slice().sort((a,b)=>{
+    const db=parseDate(b.dueDate), da=parseDate(a.dueDate);
+    const tb=db&&!isNaN(db)?db.getTime():0, ta=da&&!isNaN(da)?da.getTime():0;
+    return tb-ta;
   });
-  // Tiles read through the same primitives the vouchers print from, so the
-  // header figures can never disagree with a slip in a parent's hand.
-  const total=D.transportFees.reduce((a,b)=>a+(Number(b&&b.amt)||0),0);
-  const paid=D.transportFees.reduce((a,b)=>a+tfPaidAmt(b),0);
-  const pending=D.transportFees.reduce((a,b)=>a+tfRemainingAmt(b),0);
+
+  // A record whose own month is marked Inactive for that student doesn't
+  // count toward Total/Collected/Pending — it still exists (so a receipt
+  // already printed stays valid), it just stops being billed going forward.
+  // When a specific month is filtered, the tiles narrow to that month too,
+  // so "Total Due" etc. always describes exactly what's on screen.
+  const forTotals=(TFF.month?D.transportFees.filter(t=>tfRecordMonth(t)===TFF.month):D.transportFees)
+    .filter(t=>!isMonthInactive(t.roll,tfRecordMonth(t)));
+  const total=forTotals.reduce((a,b)=>a+(Number(b&&b.amt)||0),0);
+  const paid=forTotals.reduce((a,b)=>a+tfPaidAmt(b),0);
+  const pending=forTotals.reduce((a,b)=>a+tfRemainingAmt(b),0);
   if($('tf-total'))  $('tf-total').textContent=fmt(total);
   if($('tf-paid'))   $('tf-paid').textContent=fmt(paid);
   if($('tf-pending'))$('tf-pending').textContent=fmt(pending);
-  if($('tf-count'))  $('tf-count').textContent=D.transportFees.length;
+  // Unique riders, not "one row per month billed" — otherwise the same two
+  // students re-billed every month would make this figure climb forever.
+  if($('tf-count'))  $('tf-count').textContent=new Set(D.transportFees.map(t=>t.roll)).size;
+
+  // Fleet-wide seat utilization — total occupied seats across every Active
+  // route vs. their combined capacity, so an admin can see at a glance
+  // whether the fleet has room for more students without opening each route.
+  const activeRoutes=D.routes.filter(r=>r.status==='Active');
+  const totalCap=activeRoutes.reduce((a,r)=>a+(Number(r.capacity)||0),0);
+  const totalUsed=activeRoutes.reduce((a,r)=>a+routeSeatsUsed(r.routeId),0);
+  if($('tf-fleet')) $('tf-fleet').textContent=totalCap?(totalUsed+'/'+totalCap):'—';
+  if($('tf-fleet-lbl')) $('tf-fleet-lbl').textContent=activeRoutes.length+' Active Route'+(activeRoutes.length!==1?'s':'')+' · Seat Utilization';
+
+  renderRouteDocAlert('tf-doc-alert');
 
   const tb=$('tfTB');
   if(!tb)return;
@@ -3635,12 +3687,16 @@ function rTransportFee(){
   }
   tb.innerHTML=data.map(t=>{
     const idx=D.transportFees.indexOf(t);
-    const rowPaid=tfPaidAmt(t), rowRem=tfRemainingAmt(t), rowSt=tfComputeStatus(t);
+    const recMonth=tfRecordMonth(t);
+    const inactive=isMonthInactive(t.roll,recMonth);
+    const rowPaid=tfPaidAmt(t), rowRem=tfRemainingAmt(t);
+    const rowSt=inactive?'Inactive':tfComputeStatus(t);
+    const owes=!inactive&&(rowSt.indexOf('Overdue')>=0||rowSt==='Pending'||rowSt==='Partial');
     return`<tr>
       <td><strong>${t.student}</strong></td>
       <td>${t.roll}</td>
       <td style="font-size:12px;color:var(--s4)">${t.route||'—'}</td>
-      <td><strong>Rs ${fmt(t.amt)}</strong>${rowPaid>0?`<div style="font-size:11px;color:var(--s4)">Paid Rs ${fmt(rowPaid)}${rowRem>0?' · Rem Rs '+fmt(rowRem):''}</div>`:''}</td>
+      <td><strong>Rs ${fmt(t.amt)}</strong>${rowPaid>0?`<div style="font-size:11px;color:var(--s4)">Paid Rs ${fmt(rowPaid)}${rowRem>0?' · Rem Rs '+fmt(rowRem):''}</div>`:''}${inactive?`<div style="font-size:10px;color:#92400e">Not billed — Inactive</div>`:''}</td>
       <td>${t.dueDate||'—'}</td>
       <td>${bdg(rowSt)}</td>
       <td style="white-space:nowrap">
@@ -3654,6 +3710,8 @@ function rTransportFee(){
                 <button onclick="printTransportVoucher(${idx},'voucher');closeAllMenus()">🖨️ Print Voucher</button>
                 ${rowPaid>0?`<button onclick="printTransportVoucher(${idx},'receipt');closeAllMenus()">🧾 Print Receipt</button>`:''}`
             }
+            ${owes?`<button onclick="remindOneTransport(${idx});closeAllMenus()">📱 Send Reminder</button>`:''}
+            <button onclick="openTransportStatusFor('${t.roll}');closeAllMenus()">🚦 Manage Status</button>
             <button onclick="openEditTransportFee(${idx});closeAllMenus()">✏️ Edit</button>
             <hr>
             <button class="adt-red" onclick="delTransportFee(${idx});closeAllMenus()">🗑 Delete</button>
@@ -3663,12 +3721,34 @@ function rTransportFee(){
     </tr>`;
   }).join('');
 }
+// "Remind Overdue" (Transport Fee page header) — selects every student who
+// still owes something specifically on Transport (not general tuition) and
+// opens the same WhatsApp/SMS reminder modal the Fees module uses, so there
+// is only one reminder pipeline to maintain rather than a parallel one.
+function remindTransportOverdue(){
+  const owing=D.students.filter(s=>studentTfRemaining(s)>0);
+  if(!owing.length){toast('✅ No outstanding transport dues — nobody to remind');return;}
+  _remState.selected=new Set(owing.map(s=>s.roll));
+  openReminderModal('whatsapp');
+}
+// Single-row "Send Reminder" from a Transport Fee record's action menu —
+// same pipeline, pre-selected to just that one student.
+function remindOneTransport(idx){
+  const t=D.transportFees[idx];
+  if(!t)return;
+  const stu=D.students.find(s=>s.roll===t.roll);
+  if(!stu){toast('❌ Student record not found');return;}
+  if(!(stu.contact||'').replace(/\D/g,'')){toast('❌ No contact number on file for '+t.student);return;}
+  _remState.selected=new Set([t.roll]);
+  openReminderModal('whatsapp');
+}
 function tfF(v){TFF.q=v.toLowerCase();rTransportFee();}
 function tfFSt(v){TFF.st=v;rTransportFee();}
 function tfFGn(v){TFF.gn=v;rTransportFee();}
 function tfFCls(v){TFF.cls=v;rTransportFee();}
 function tfFSec(v){TFF.sec=v;rTransportFee();}
 function tfFRoute(v){TFF.route=v;rTransportFee();}
+function tfFMonth(v){TFF.month=v;rTransportFee();}
 
 function populateTransportFilterDropdowns(){
   if(!D.classes) return;
@@ -3692,6 +3772,15 @@ function populateTransportFilterDropdowns(){
     const cur=routeSel.value;
     const allRoutes=[...new Set(D.transportFees.map(t=>t.route).filter(Boolean))].sort();
     routeSel.innerHTML='<option value="">All Routes</option>'+allRoutes.map(r=>`<option value="${r}"${cur===r?' selected':''}>${r}</option>`).join('');
+  }
+  const monthSel=$('transport-filter-month');
+  if(monthSel){
+    const cur=monthSel.value;
+    // Newest month first — matches the sort order of the table itself, so
+    // the filter list and the rows it filters read in the same direction.
+    const allMonths=[...new Set(D.transportFees.map(t=>tfRecordMonth(t)).filter(Boolean))]
+      .sort((a,b)=>(monthLabelNum(b)||0)-(monthLabelNum(a)||0));
+    monthSel.innerHTML='<option value="">All Months</option>'+allMonths.map(m=>`<option value="${m}"${cur===m?' selected':''}>${m}</option>`).join('');
   }
 }
 
@@ -3906,6 +3995,186 @@ function delTransportFee(idx){
 }
 
 /* ══════════════════════════════════════════════════
+   TRANSPORT STATUS — Active / Inactive, per specific month
+   A student can be marked Inactive for one or more explicit months (e.g.
+   just exams-at-home month), or Inactive from a given month onward with no
+   end date (permanent discontinuation) — reached via a single searchable
+   "Manage Status" tool rather than editing each monthly fee row by hand.
+   Auto-Generate, the seat count, and the Total/Collected/Pending tiles all
+   check this before counting a student, so marking a month Inactive takes
+   effect everywhere at once, including retroactively on an already-issued
+   record for that month.
+══════════════════════════════════════════════════ */
+const TF_MONTH_NAMES=['January','February','March','April','May','June','July','August','September','October','November','December'];
+// "September 2026" → a single comparable integer (year*12 + monthIndex),
+// built from real Date arithmetic everywhere it's generated, so a range
+// that crosses a year boundary (Dec 2026 → Jan 2027) compares correctly
+// with no special-casing needed for "next year".
+function monthLabelNum(label){
+  const p=(label||'').trim().split(' ');
+  if(p.length!==2) return null;
+  const mi=TF_MONTH_NAMES.indexOf(p[0]);
+  const y=parseInt(p[1]);
+  if(mi<0||!isFinite(y)) return null;
+  return y*12+mi;
+}
+function currentMonthLabel(){
+  const d=new Date();
+  return TF_MONTH_NAMES[d.getMonth()]+' '+d.getFullYear();
+}
+// "<option>" list for the current month + the next `n-1` months, always
+// derived from `new Date()` (never a hand-written year), so it keeps working
+// unmodified into 2027, 2028, etc.
+function monthRangeOptions(n){
+  const now=new Date();
+  let html='';
+  for(let i=0;i<n;i++){
+    const d=new Date(now.getFullYear(),now.getMonth()+i,1);
+    const label=TF_MONTH_NAMES[d.getMonth()]+' '+d.getFullYear();
+    html+=`<option value="${label}">${label}</option>`;
+  }
+  return html;
+}
+// A transport fee record doesn't always carry a `.month` label (only
+// Auto-Generated ones do) — a manually "Assigned" record only has a
+// dueDate. Deriving the month from dueDate when `.month` is absent means
+// every record, old or new, can still be matched against Inactive months
+// and grouped by the Month filter.
+function tfRecordMonth(t){
+  if(!t) return null;
+  if(t.month) return t.month;
+  if(t.dueDate){
+    const d=parseDate(t.dueDate);
+    if(d&&!isNaN(d)) return TF_MONTH_NAMES[d.getMonth()]+' '+d.getFullYear();
+  }
+  return null;
+}
+// Is this roll Inactive for the given "Month Year" label? Checked by
+// Auto-Generate, the seat count, and the fee tiles — the single source of
+// truth for "is this student actually riding (or being billed) this month".
+function isMonthInactive(roll,monthLabel){
+  const ts=D.transportStatus[roll];
+  if(!ts||!monthLabel) return false;
+  const target=monthLabelNum(monthLabel);
+  if(ts.permanentFrom!=null){
+    const pf=monthLabelNum(ts.permanentFrom);
+    if(pf!=null&&target!=null&&target>=pf) return true;
+  }
+  return (ts.inactiveMonths||[]).includes(monthLabel);
+}
+
+// ── Manage Transport Status modal — searchable, reachable from the page
+// header (works for any student) or from a row's action menu (pre-fills
+// that student). Each Inactive entry is a specific month or an open-ended
+// "from this month on", and either can be individually undone later.
+let _tsRoll=null;
+function openTransportStatusManager(){
+  if(!requirePerm('canEdit','manage transport status'))return;
+  _tsRoll=null;
+  $('mts-search').value='';
+  $('mts-list').innerHTML='';
+  $('mts-selected').style.display='none';
+  showMo('tfStatus');
+}
+// Opened from a Transport Fee row's ⋯ menu — same modal, pre-selected.
+function openTransportStatusFor(roll){
+  openTransportStatusManager();
+  tsSelectStudent(roll);
+}
+function tsSearchStudents(q){
+  const list=$('mts-list');
+  if(!q){list.innerHTML='';return;}
+  const ql=q.toLowerCase();
+  const results=D.students.filter(s=>s.name.toLowerCase().includes(ql)||s.roll.toLowerCase().includes(ql)).slice(0,8);
+  if(!results.length){list.innerHTML='<div style="padding:12px;text-align:center;color:var(--s4);font-size:12px">No student found</div>';return;}
+  list.innerHTML=results.map(s=>`
+    <div onclick="tsSelectStudent('${s.roll}')"
+      style="display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--s1)"
+      onmouseover="this.style.background='var(--g0)'" onmouseout="this.style.background=''">
+      <div style="width:28px;height:28px;border-radius:50%;background:${s.gender==='Male'?'var(--bl)':'var(--pu)'};color:#fff;font-weight:700;font-size:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${s.name[0]}</div>
+      <div style="flex:1;min-width:0"><div style="font-weight:700;font-size:13px;color:var(--s6)">${s.name}</div>
+      <div style="font-size:11px;color:var(--s4)">${s.roll}${s.dept?' · '+s.dept:''}</div></div>
+    </div>`).join('');
+}
+function tsSelectStudent(roll){
+  const s=D.students.find(x=>x.roll===roll);
+  if(!s){toast('❌ Student not found');return;}
+  _tsRoll=roll;
+  $('mts-search').value=s.name+' ('+s.roll+')';
+  $('mts-list').innerHTML='';
+  $('mts-selected').style.display='block';
+  $('mts-av').textContent=s.name[0];
+  $('mts-av').style.background=s.gender==='Male'?'var(--bl)':'var(--pu)';
+  $('mts-nm').textContent=s.name;
+  $('mts-info').textContent=s.roll+(s.dept?' · '+s.dept:'');
+  $('mts-month').innerHTML=monthRangeOptions(24);
+  $('mts-permanent').checked=false;
+  $('mts-reason').value='';
+  renderTsCurrentList();
+}
+function renderTsCurrentList(){
+  const box=$('mts-currentList');
+  if(!box||!_tsRoll)return;
+  const ts=D.transportStatus[_tsRoll];
+  const hasAny=ts&&((ts.inactiveMonths&&ts.inactiveMonths.length)||ts.permanentFrom);
+  if(!hasAny){
+    box.innerHTML='<div style="font-size:12px;color:var(--s4)">✅ Currently Active — billed normally every month.</div>';
+    return;
+  }
+  let html='<div style="font-size:10px;font-weight:700;color:var(--s4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Currently Inactive</div><div style="display:flex;flex-wrap:wrap;gap:6px">';
+  if(ts.permanentFrom) html+=`<span class="badge bg-r">${htmlEsc(ts.permanentFrom)} → onward <a href="#" onclick="tsClearPermanent();return false" style="color:inherit;margin-left:6px;font-weight:900">✕</a></span>`;
+  (ts.inactiveMonths||[]).slice().sort((a,b)=>(monthLabelNum(a)||0)-(monthLabelNum(b)||0)).forEach(m=>{
+    html+=`<span class="badge bg-y">${htmlEsc(m)} <a href="#" onclick="tsRemoveMonth('${m}');return false" style="color:inherit;margin-left:6px;font-weight:900">✕</a></span>`;
+  });
+  box.innerHTML=html+'</div>'+(ts.reason?`<div style="font-size:11px;color:var(--s4);margin-top:6px">Reason: ${htmlEsc(ts.reason)}</div>`:'');
+}
+function tsRemoveMonth(m){
+  const ts=D.transportStatus[_tsRoll];
+  if(!ts)return;
+  ts.inactiveMonths=(ts.inactiveMonths||[]).filter(x=>x!==m);
+  if(!ts.inactiveMonths.length&&!ts.permanentFrom) delete D.transportStatus[_tsRoll];
+  auditLog('action','Transport reactivated for '+m+' — '+_tsRoll);
+  renderTsCurrentList();rTransportFee();rRouteMaster();
+}
+function tsClearPermanent(){
+  const ts=D.transportStatus[_tsRoll];
+  if(!ts)return;
+  delete ts.permanentFrom;
+  if(!ts.inactiveMonths||!ts.inactiveMonths.length) delete D.transportStatus[_tsRoll];
+  auditLog('action','Transport reactivated (permanent stop cleared) — '+_tsRoll);
+  renderTsCurrentList();rTransportFee();rRouteMaster();
+}
+function tsSetStatus(mode){
+  if(!requirePerm('canEdit','manage transport status'))return;
+  if(!_tsRoll){toast('❌ Please search and select a student first');return;}
+  const month=$('mts-month').value;
+  const permanent=$('mts-permanent').checked;
+  const reason=$('mts-reason').value.trim();
+  const stu=D.students.find(s=>s.roll===_tsRoll);
+  const name=stu?stu.name:_tsRoll;
+  if(mode==='inactive'){
+    if(!D.transportStatus[_tsRoll]) D.transportStatus[_tsRoll]={inactiveMonths:[]};
+    const ts=D.transportStatus[_tsRoll];
+    if(permanent){ ts.permanentFrom=month; }
+    else { ts.inactiveMonths=ts.inactiveMonths||[]; if(!ts.inactiveMonths.includes(month)) ts.inactiveMonths.push(month); }
+    if(reason) ts.reason=reason;
+    auditLog('action','Transport marked Inactive for '+name+' — '+month+(permanent?' onward':''));
+    toast('⛔ '+name+' marked Inactive for '+month+(permanent?' onward':''));
+  }else{
+    const ts=D.transportStatus[_tsRoll];
+    if(ts){
+      if(ts.permanentFrom===month) delete ts.permanentFrom;
+      ts.inactiveMonths=(ts.inactiveMonths||[]).filter(m=>m!==month);
+      if(!ts.inactiveMonths.length&&!ts.permanentFrom) delete D.transportStatus[_tsRoll];
+    }
+    auditLog('action','Transport marked Active for '+name+' — '+month);
+    toast('✅ '+name+' marked Active for '+month);
+  }
+  renderTsCurrentList();
+  rTransportFee();rRouteMaster();
+}
+
+/* ══════════════════════════════════════════════════
    ROUTE / VEHICLE MASTER
    The fixed list of vans/routes the college runs. Transport Fee assignment
    picks a route from here (vehicle no, driver, capacity, fixed monthly fee)
@@ -3921,21 +4190,65 @@ function nextRouteId(){
 function routeUsageCount(routeId){
   return D.transportFees.filter(t=>t.routeId===routeId).length;
 }
+// Seats currently occupied on a route = students whose MOST RECENT transport
+// fee record points at this route (same "currently enrolled" definition the
+// Auto-Generate feature already uses via tfEnrolledStudents()) — so a
+// student who was moved to a different route later isn't double-counted.
+// Anyone currently Paused or Stopped isn't occupying the seat this month.
+function routeSeatsUsed(routeId){
+  const nowLbl=currentMonthLabel();
+  return tfEnrolledStudents().filter(t=>t.routeId===routeId&&!isMonthInactive(t.roll,nowLbl)).length;
+}
+// Vehicle-document expiry status (fitness certificate / insurance). Buckets
+// mirror the fee/salary "Overdue" pattern: Expired (red), Expiring Soon —
+// within 30 days (amber), Valid (green), or Not Set (gray) when the date was
+// never entered, so an empty field never silently reads as "fine".
+function routeDocStatus(dateStr){
+  if(!dateStr) return {label:'Not Set', cls:'badge bg-g'};
+  const exp=new Date(dateStr+'T00:00:00');
+  if(isNaN(exp)) return {label:'Not Set', cls:'badge bg-g'};
+  const today=new Date(); today.setHours(0,0,0,0);
+  const days=Math.round((exp-today)/86400000);
+  const dateLbl=exp.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+  if(days<0) return {label:'Expired · '+dateLbl, cls:'badge bg-r'};
+  if(days<=30) return {label:'Expires in '+days+'d · '+dateLbl, cls:'badge bg-y'};
+  return {label:dateLbl, cls:'badge bg-g'};
+}
+// Any route whose fitness certificate or insurance has expired or is expiring
+// within 30 days — surfaced as a banner on the Transport Fee page so an
+// admin doesn't have to open Route Master just to notice.
+function routesNeedingDocAttention(){
+  return D.routes.filter(r=>{
+    const f=routeDocStatus(r.fitnessExpiry), i=routeDocStatus(r.insuranceExpiry);
+    return f.cls!=='badge bg-g'||i.cls!=='badge bg-g';
+  });
+}
 function rRouteMaster(){
   const tb=$('rtTB');
   if(!tb)return;
   if(!D.routes.length){
-    tb.innerHTML='<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--s4);font-size:13px">No routes added yet</td></tr>';
+    tb.innerHTML='<tr><td colspan="9" style="text-align:center;padding:20px;color:var(--s4);font-size:13px">No routes added yet</td></tr>';
   }else{
     tb.innerHTML=D.routes.map(r=>{
       const idx=D.routes.indexOf(r);
       const cnt=routeUsageCount(r.routeId);
+      const used=routeSeatsUsed(r.routeId);
+      const cap=r.capacity||0;
+      const pct=cap?Math.min(100,Math.round(used/cap*100)):0;
+      const overCap=cap&&used>cap;
+      const fit=routeDocStatus(r.fitnessExpiry);
+      const ins=routeDocStatus(r.insuranceExpiry);
       return`<tr>
         <td><strong>${r.name}</strong></td>
         <td>${r.vehicleNo||'—'}</td>
         <td>${r.driverName||'—'}${r.driverPhone?'<div style="font-size:11px;color:var(--s4)">'+r.driverPhone+'</div>':''}</td>
-        <td>${r.capacity?r.capacity+' seats':'—'}</td>
+        <td style="min-width:100px">
+          <div style="font-size:12px;font-weight:700;color:${overCap?'var(--rd)':'var(--s6)'}">${used}${cap?'/'+cap:''} ${overCap?'⚠️':''}</div>
+          ${cap?'<div style="height:5px;background:var(--s1);border-radius:3px;margin-top:3px;overflow:hidden;width:70px"><div style="height:100%;width:'+pct+'%;background:'+(overCap?'var(--rd)':pct>85?'#f59e0b':'var(--g5)')+';border-radius:3px"></div></div>':''}
+        </td>
         <td><strong>Rs ${fmt(r.monthlyFee||0)}</strong></td>
+        <td><span class="${fit.cls}" style="white-space:nowrap">${fit.label}</span></td>
+        <td><span class="${ins.cls}" style="white-space:nowrap">${ins.label}</span></td>
         <td>${bdg(r.status||'Active')}</td>
         <td style="white-space:nowrap">
           <button class="mo-cancel" style="padding:5px 10px;font-size:11px" onclick="openEditRoute(${idx})">✏️ Edit</button>
@@ -3946,8 +4259,27 @@ function rRouteMaster(){
   }
   fillTfRouteDropdown();
 }
+// Renders the "some vehicle's paperwork needs attention" banner shared by
+// Route Master and the Transport Fee page — one source of truth so the two
+// can't drift out of sync on wording.
+function renderRouteDocAlert(targetId){
+  const el=$(targetId);
+  if(!el)return;
+  const flagged=routesNeedingDocAttention();
+  if(!flagged.length){el.style.display='none';el.innerHTML='';return;}
+  const expired=flagged.filter(r=>routeDocStatus(r.fitnessExpiry).cls==='badge bg-r'||routeDocStatus(r.insuranceExpiry).cls==='badge bg-r');
+  const soon=flagged.filter(r=>!expired.includes(r));
+  el.style.display='block';
+  el.innerHTML=`<div style="background:${expired.length?'#fff1f1':'#fffbeb'};border:1px solid ${expired.length?'#fca5a5':'#fcd34d'};border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:12.5px;color:${expired.length?'#991b1b':'#92400e'}">
+    ${expired.length?'🚨 <strong>'+expired.length+' vehicle'+(expired.length!==1?'s':'')+'</strong> with expired paperwork: '+htmlEsc(expired.map(r=>r.name+(r.vehicleNo?' ('+r.vehicleNo+')':'')).join(', ')):''}
+    ${expired.length&&soon.length?'<br>':''}
+    ${soon.length?'⚠️ <strong>'+soon.length+' vehicle'+(soon.length!==1?'s':'')+'</strong> with certificates expiring within 30 days: '+htmlEsc(soon.map(r=>r.name+(r.vehicleNo?' ('+r.vehicleNo+')':'')).join(', ')):''}
+    &nbsp;<a href="#" onclick="openRouteMaster();return false;" style="font-weight:700;color:inherit;text-decoration:underline">Review in Route Master</a>
+  </div>`;
+}
 function openRouteMaster(){
   rRouteMaster();
+  renderRouteDocAlert('rt-doc-alert');
   showMo('routeMaster');
 }
 function openAddRoute(){
@@ -3957,6 +4289,8 @@ function openAddRoute(){
   $('rt-name').value='';$('rt-vehicle').value='';$('rt-driver').value='';
   $('rt-phone').value='';$('rt-capacity').value='40';$('rt-fee').value='2500';
   $('rt-status').value='Active';
+  if($('rt-fitness'))$('rt-fitness').value='';
+  if($('rt-insurance'))$('rt-insurance').value='';
   showMo('addRoute');
 }
 function openEditRoute(idx){
@@ -3972,6 +4306,8 @@ function openEditRoute(idx){
   $('rt-capacity').value=r.capacity||'';
   $('rt-fee').value=r.monthlyFee||0;
   $('rt-status').value=r.status||'Active';
+  if($('rt-fitness'))$('rt-fitness').value=r.fitnessExpiry||'';
+  if($('rt-insurance'))$('rt-insurance').value=r.insuranceExpiry||'';
   showMo('addRoute');
 }
 function saveRoute(){
@@ -3987,19 +4323,23 @@ function saveRoute(){
   const monthlyFee=parseInt($('rt-fee').value)||0;
   if(!monthlyFee||monthlyFee<0){toast('❌ Valid monthly fee is required');return;}
   const status=$('rt-status').value||'Active';
+  const fitnessExpiry=($('rt-fitness')||{}).value||'';
+  const insuranceExpiry=($('rt-insurance')||{}).value||'';
   if(isEdit){
     const r=D.routes[editIdx];
     r.name=name;r.vehicleNo=vehicleNo;r.driverName=driverName;r.driverPhone=driverPhone;
     r.capacity=capacity;r.monthlyFee=monthlyFee;r.status=status;
+    r.fitnessExpiry=fitnessExpiry;r.insuranceExpiry=insuranceExpiry;
     auditLog('action','Route updated: '+name);
     toast('✅ Route updated');
   }else{
-    D.routes.push({routeId:nextRouteId(),name,vehicleNo,driverName,driverPhone,capacity,monthlyFee,status});
+    D.routes.push({routeId:nextRouteId(),name,vehicleNo,driverName,driverPhone,capacity,monthlyFee,status,fitnessExpiry,insuranceExpiry});
     auditLog('action','Route added: '+name);
     toast('✅ Route "'+name+'" added');
   }
   closeMo('addRoute');
   rRouteMaster();
+  rTransportFee();
 }
 function delRoute(idx){
   if(!requirePerm('canEdit','delete route'))return;
@@ -4047,7 +4387,9 @@ function tfRouteSelected(val){
    of the clerk re-creating one by hand for every student every month.
    Enrollment is derived from each student's MOST RECENT transport fee
    record (route + amount) rather than a separate enrollment list, so there
-   is nothing new to keep in sync.
+   is nothing new to keep in sync. A student Paused for the selected month,
+   or Stopped altogether, is excluded here even though their most recent
+   record still shows a route — see isMonthInactive().
 ══════════════════════════════════════════════════ */
 // One row per roll — the last (most recently added) record for that
 // student, which is what "currently enrolled, on this route, at this fee"
@@ -4078,28 +4420,36 @@ function refreshAutoGenTfPreview(){
   if(!month){$('agTfPreview').innerHTML='';return;}
   const enrolled=tfEnrolledStudents();
   const existingRolls=D.transportFees.filter(t=>t.month===month).map(t=>t.roll);
-  const toGen=enrolled.filter(t=>!existingRolls.includes(t.roll));
+  // Paused-through-this-month / Stopped riders are excluded from billing
+  // entirely — checked before the "already exists" bucket so a paused
+  // student never gets counted as "to generate" for a month they're off.
+  const notRiding=enrolled.filter(t=>!existingRolls.includes(t.roll)&&isMonthInactive(t.roll,month));
+  const toGen=enrolled.filter(t=>!existingRolls.includes(t.roll)&&!isMonthInactive(t.roll,month));
   const skipped=enrolled.filter(t=>existingRolls.includes(t.roll));
   const totalAmt=toGen.reduce((a,t)=>a+(Number(t.amt)||0),0);
 
   $('agTfPreview').innerHTML=`
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:14px">
       <div style="background:#f0fdf4;border-radius:8px;padding:10px 12px;text-align:center">
-        <div style="font-size:10px;color:#15803d;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Generate Honge</div>
+        <div style="font-size:10px;color:#15803d;font-weight:700;text-transform:uppercase;letter-spacing:.5px">To Be Generated</div>
         <div style="font-size:22px;font-weight:900;color:#0d3b1e;margin-top:3px">${toGen.length}</div>
       </div>
       <div style="background:#fef2f2;border-radius:8px;padding:10px 12px;text-align:center">
-        <div style="font-size:10px;color:#b91c1c;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Skip (already hai)</div>
+        <div style="font-size:10px;color:#b91c1c;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Skipped (Already Exists)</div>
         <div style="font-size:22px;font-weight:900;color:#7f1d1d;margin-top:3px">${skipped.length}</div>
+      </div>
+      <div style="background:#fffbeb;border-radius:8px;padding:10px 12px;text-align:center">
+        <div style="font-size:10px;color:#92400e;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Paused / Stopped</div>
+        <div style="font-size:22px;font-weight:900;color:#78350f;margin-top:3px">${notRiding.length}</div>
       </div>
       <div style="background:#eff6ff;border-radius:8px;padding:10px 12px;text-align:center">
         <div style="font-size:10px;color:#1d4ed8;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Total Billing</div>
         <div style="font-size:16px;font-weight:900;color:#1e3a8a;margin-top:3px">Rs ${fmt(totalAmt)}</div>
       </div>
     </div>
-    ${toGen.length===0?`<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:12px 14px;font-size:13px;color:#92400e;text-align:center">${enrolled.length===0?'⚠️ No students are enrolled in transport yet — assign at least one Transport Fee first.':'✅ Transport fee records for '+month+' already exist for all enrolled students.'}</div>`:`
+    ${toGen.length===0?`<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:12px 14px;font-size:13px;color:#92400e;text-align:center">${enrolled.length===0?'⚠️ No students are enrolled in transport yet — assign at least one Transport Fee first.':'✅ No new transport fee records to generate for '+month+'.'}</div>`:`
     <div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;max-height:200px;overflow-y:auto">
-      <div style="padding:7px 12px;background:#f9fafb;font-size:10px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #e5e7eb">Generate honge — ${month}</div>
+      <div style="padding:7px 12px;background:#f9fafb;font-size:10px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #e5e7eb">To Be Generated — ${month}</div>
       ${toGen.map(t=>`
         <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #f3f4f6">
           <div>
@@ -4109,11 +4459,12 @@ function refreshAutoGenTfPreview(){
           <div style="font-size:13px;font-weight:700">Rs ${fmt(t.amt)}</div>
         </div>`).join('')}
     </div>`}
-    ${skipped.length>0?`<div style="margin-top:8px;padding:8px 12px;background:#f9fafb;border-radius:8px;font-size:12px;color:#6b7280">⏭ Skip hone wale: ${skipped.map(t=>t.student).join(', ')}</div>`:''}
+    ${skipped.length>0?`<div style="margin-top:8px;padding:8px 12px;background:#f9fafb;border-radius:8px;font-size:12px;color:#6b7280">⏭ Will be skipped (already billed): ${skipped.map(t=>t.student).join(', ')}</div>`:''}
+    ${notRiding.length>0?`<div style="margin-top:8px;padding:8px 12px;background:#fffbeb;border-radius:8px;font-size:12px;color:#92400e">⏸ Not billed — paused/stopped for ${month}: ${notRiding.map(t=>t.student).join(', ')}</div>`:''}
   `;
   const btn=$('agTfConfirmBtn');
   if(btn)btn.disabled=toGen.length===0;
-  if(btn)btn.textContent=toGen.length>0?`⚡ ${toGen.length} Students ki Transport Fee Generate Karein`:'Sab already exist karte hain';
+  if(btn)btn.textContent=toGen.length>0?`⚡ Generate Transport Fee for ${toGen.length} Student${toGen.length!==1?'s':''}`:'All Records Already Exist';
 }
 function confirmAutoGenTf(){
   if(!requirePerm('canEdit','auto generate transport fee'))return;
@@ -4122,8 +4473,8 @@ function confirmAutoGenTf(){
   if(!month){toast('Please select a month');return;}
   const enrolled=tfEnrolledStudents();
   const existingRolls=D.transportFees.filter(t=>t.month===month).map(t=>t.roll);
-  const toGen=enrolled.filter(t=>!existingRolls.includes(t.roll));
-  if(toGen.length===0){toast('Sab already exist karte hain!');return;}
+  const toGen=enrolled.filter(t=>!existingRolls.includes(t.roll)&&!isMonthInactive(t.roll,month));
+  if(toGen.length===0){toast('No students to generate transport fee for this month');return;}
 
   const [mName,yrStr]=month.split(' ');
   const monthsArr=['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -4146,7 +4497,7 @@ function confirmAutoGenTf(){
   auditLog('action',`Auto-generated ${toGen.length} transport fee records for ${month}`);
   buildTx();rTransportFee();rDash();rStudents();
   closeMo('autoGenTf');
-  toast(`✅ ${toGen.length} students ki ${month} transport fee generate ho gayi!`);
+  toast(`✅ Transport fee for ${toGen.length} student${toGen.length!==1?'s':''} generated for ${month}!`);
 }
 
 
@@ -7515,7 +7866,7 @@ function openProcessAllModal(){
     // Add months that have pending salaries first
     const withPending=[...new Set(D.salaries.filter(s=>s.status==='Pending').map(s=>s.month))];
     if(withPending.length){
-      sel.innerHTML+='<optgroup label="Pending salaries hain">';
+      sel.innerHTML+='<optgroup label="Pending Salaries">';
       withPending.sort(salMonthSort).forEach(m=>sel.innerHTML+=`<option value="${m}">${m} (${D.salaries.filter(s=>s.month===m&&s.status==='Pending').length} pending)</option>`);
       sel.innerHTML+='</optgroup>';
     }
@@ -7543,7 +7894,7 @@ function refreshBulkPreview(){
   pre.innerHTML=`
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
       <div style="background:#fef3c7;border-radius:8px;padding:10px 12px;text-align:center">
-        <div style="font-size:10px;color:#92400e;font-weight:700;text-transform:uppercase">Process Honge</div>
+        <div style="font-size:10px;color:#92400e;font-weight:700;text-transform:uppercase">To Be Processed</div>
         <div style="font-size:22px;font-weight:900;color:#78350f">${pending.length}</div>
       </div>
       <div style="background:#f0fdf4;border-radius:8px;padding:10px 12px;text-align:center">
@@ -7611,11 +7962,11 @@ function refreshAutoGenPreview(){
   $('agPreview').innerHTML=`
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px">
       <div style="background:#f0fdf4;border-radius:8px;padding:10px 12px;text-align:center">
-        <div style="font-size:10px;color:#15803d;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Generate Honge</div>
+        <div style="font-size:10px;color:#15803d;font-weight:700;text-transform:uppercase;letter-spacing:.5px">To Be Generated</div>
         <div style="font-size:22px;font-weight:900;color:#0d3b1e;margin-top:3px">${toGen.length}</div>
       </div>
       <div style="background:#fef2f2;border-radius:8px;padding:10px 12px;text-align:center">
-        <div style="font-size:10px;color:#b91c1c;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Skip (already hai)</div>
+        <div style="font-size:10px;color:#b91c1c;font-weight:700;text-transform:uppercase;letter-spacing:.5px">Skipped (Already Exists)</div>
         <div style="font-size:22px;font-weight:900;color:#7f1d1d;margin-top:3px">${skipped.length}</div>
       </div>
       <div style="background:#eff6ff;border-radius:8px;padding:10px 12px;text-align:center">
@@ -7625,7 +7976,7 @@ function refreshAutoGenPreview(){
     </div>
     ${toGen.length===0?`<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:12px 14px;font-size:13px;color:#92400e;text-align:center">✅ Salary records for ${month} already exist for all employees.</div>`:`
     <div style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;max-height:200px;overflow-y:auto">
-      <div style="padding:7px 12px;background:#f9fafb;font-size:10px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #e5e7eb">Generate honge — ${month}</div>
+      <div style="padding:7px 12px;background:#f9fafb;font-size:10px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #e5e7eb">To Be Generated — ${month}</div>
       ${toGen.map(e=>{const net=e.salary+e.allow;return`
         <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #f3f4f6">
           <div>
@@ -7638,11 +7989,11 @@ function refreshAutoGenPreview(){
           </div>
         </div>`}).join('')}
     </div>`}
-    ${skipped.length>0?`<div style="margin-top:8px;padding:8px 12px;background:#f9fafb;border-radius:8px;font-size:12px;color:#6b7280">⏭ Skip hone wale: ${skipped.map(e=>e.name).join(', ')}</div>`:''}
+    ${skipped.length>0?`<div style="margin-top:8px;padding:8px 12px;background:#f9fafb;border-radius:8px;font-size:12px;color:#6b7280">⏭ Will be skipped: ${skipped.map(e=>e.name).join(', ')}</div>`:''}
   `;
   const btn=$('agConfirmBtn');
   if(btn)btn.disabled=toGen.length===0;
-  if(btn)btn.textContent=toGen.length>0?`⚡ ${toGen.length} Employees ki Salary Generate Karein`:'Sab already exist karte hain';
+  if(btn)btn.textContent=toGen.length>0?`⚡ Generate Salary for ${toGen.length} Employee${toGen.length!==1?'s':''}`:'All Records Already Exist';
 }
 
 function confirmAutoGen(){
@@ -7654,7 +8005,7 @@ function confirmAutoGen(){
   const active=D.employees.filter(e=>e.status==='Active');
   const existing=D.salaries.filter(s=>s.month===month).map(s=>s.name);
   const toGen=active.filter(e=>!existing.includes(e.name));
-  if(toGen.length===0){toast('Sab already exist karte hain!');return;}
+  if(toGen.length===0){toast('All records already exist!');return;}
   toGen.forEach(e=>{
     D.salaries.push({
       salId:genSalId(),
@@ -7668,7 +8019,7 @@ function confirmAutoGen(){
   auditLog('action',`Auto-generated ${toGen.length} salary records for ${month}`);
   buildTx();rSalaries();rTx();rDash();
   closeMo('autoGenSal');
-  toast(`✅ ${toGen.length} employees ki ${month} salary generate ho gayi!`);
+  toast(`✅ Salary for ${toGen.length} employee${toGen.length!==1?'s':''} generated for ${month}!`);
 }
 
 function getCurrentMonthLabel(){
@@ -8023,7 +8374,7 @@ function addExpCat(){
   const name=($('nc-name')||{}).value.trim();
   const icon=($('nc-icon')||{}).value.trim()||'📌';
   if(!name){toast('Please enter a category name');return;}
-  if(D.expCategories.find(c=>c.name===name)){toast('Ye category already exist karti hai');return;}
+  if(D.expCategories.find(c=>c.name===name)){toast('This category already exists');return;}
   const colors=['#10b981','#f59e0b','#3b82f6','#ef4444','#8b5cf6','#06b6d4','#ec4899','#f97316'];
   D.expCategories.push({name,icon,color:colors[D.expCategories.length%colors.length],budget:0});
   $('nc-name').value='';$('nc-icon').value='';
@@ -8441,7 +8792,7 @@ function rReports(){
   var incomeData=monthLabels.map(m=>incomeMap[m]||0);
   var expData   =monthLabels.map(m=>expMap[m]||0);
 
-  // Chart title — jab date filter active ho to woh bhi title mein dikha do
+  // Chart title — also reflect the active date filter, if any
   var chTitleEl=$('ch-monthly-title');
   if(chTitleEl){
     var rf=window._rpFilter;
@@ -8460,7 +8811,7 @@ function rReports(){
 
 function rpCloseBox(){
   $('rpBox').style.display='none';
-  // Active card highlight hata do
+  // Clear the active card highlight
   document.querySelectorAll('#rpCards .rc').forEach(c=>c.classList.remove('on'));
   var eb=$('rpExportBtn'); if(eb)eb.style.display='none';
   var pb=$('rpPrintBtn'); if(pb)pb.style.display='none';
@@ -8475,7 +8826,7 @@ function rpShow(type){
   if(activeCard) activeCard.classList.add('on');
   const titles={fee:'Fee Collection Report',salary:'Salary Report',expense:'Expense Report',balance:'Balance Sheet',student:'Student Ledger',annual:'Annual Report',transport:'Transport Report','fee-boys':'Boys Fee Collection Report','fee-girls':'Girls Fee Collection Report','student-boys':'Boys Student Ledger','student-girls':'Girls Student Ledger'};
 
-  // Date filter label — title mein show karo
+  // Date filter label — reflected in the title
   var fLabel='';
   var rf=window._rpFilter;
   if(rf&&(rf.month||rf.from||rf.to)){
@@ -8483,7 +8834,7 @@ function rpShow(type){
   }
   $('rpTitle').textContent=(titles[type]||type)+fLabel;
 
-  // Filtered data sets — date filter apply karo
+  // Filtered data sets — with the date filter applied
   const filteredFees    = D.fees.filter(f=>_rpDateInRange(f.date));
   const filteredExpenses= D.expenses.filter(e=>_rpDateInRange(e.date));
   const filteredSalaries= D.salaries.filter(s=>_rpSalInRange(s.month));
@@ -9117,7 +9468,7 @@ function rpShow(type){
   rpts['student-girls'] =
     secHead('Intermediate — Girls ('+girlsInter.length+')')+(girlsInter.map(stuRow2).join('')||row('No students','—'));
 
-  // Fee & Student Ledger reports ke liye Boys/Girls/All toggle — pehle yeh sirf code mein tha, UI se access nahi hota tha
+  // Boys/Girls/All toggle for Fee & Student Ledger reports — previously only existed in code, with no UI access
   var genderToggle='';
   var baseType=type.replace('-boys','').replace('-girls','');
   if(baseType==='fee'||baseType==='student'){
@@ -9138,7 +9489,7 @@ function rpShow(type){
   $('rpBox').scrollIntoView({behavior:'smooth',block:'start'});
 }
 
-/* ── printReport: sirf report box ko print karta hai, pura page nahi ── */
+/* ── printReport: prints only the report box, not the whole page ── */
 function printReport(){
   var title=window._curRptTitle||'Report';
   var bodyHTML=$('rpBody') ? $('rpBody').innerHTML : '';
@@ -9194,7 +9545,7 @@ h2{font-size:18px;font-weight:800;color:#0e3824;margin-bottom:4px;}
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   DATE FILTER — Reports page ke liye month / custom range filter
+   DATE FILTER — month / custom range filter for the Reports page
 ══════════════════════════════════════════════════════════════════ */
 
 // Populate month dropdown from actual data
@@ -9251,7 +9602,7 @@ function rpApplyDateFilter(){
 
   window._rpFilter={month:monthSel, from:fromVal, to:toVal};
 
-  // Date Filter button ko highlight karo jab filter active ho
+  // Highlight the Date Filter button when a filter is active
   var btn=$('rpDateToggleBtn');
   var isActive=!!(monthSel||fromVal||toVal);
   if(btn){
@@ -9270,7 +9621,7 @@ function rpApplyDateFilter(){
     else{lbl.style.display='none';}
   }
 
-  // Chart ko bhi filter ke hisaab se refresh karo
+  // Also refresh the chart according to the filter
   try{rReports();}catch(e){console.warn(e);}
 
   // Re-render current report if one is active
@@ -9286,12 +9637,12 @@ function rpClearDateFilter(){
   // Date filter button background reset
   var btn=$('rpDateToggleBtn');
   if(btn){btn.style.background='';btn.style.color='';}
-  // Chart ko bhi refresh karo (filter clear ho gaya)
+  // Also refresh the chart (filter cleared)
   try{rReports();}catch(e){console.warn(e);}
   if(window._curRptType) rpShow(window._curRptType);
 }
 
-// Helper: date string ko parse karke Date return karo
+// Helper: parses a date string and returns a Date object
 function _rpParseDate(str){
   if(!str||str==='-')return null;
   var d=parseDate(str); // yyyy-mm-dd is parsed as LOCAL midnight, never UTC
@@ -9301,7 +9652,7 @@ function _rpParseDate(str){
   return null;
 }
 
-// Helper: kya yeh date filter ke andar hai?
+// Helper: does this date fall within the active filter range?
 function _rpDateInRange(dateStr){
   var f=window._rpFilter;
   if(!f||(!f.month&&!f.from&&!f.to))return true; // no filter
@@ -9336,12 +9687,12 @@ function _rpSalInRange(monthStr){
   return true;
 }
 
-/* ── exportReport: report data ko CSV / Excel / PDF mein export karta hai ── */
+/* ── exportReport: exports report data to CSV / Excel / PDF ── */
 function exportReport(format){
   var type=window._curRptType||'';
   var title=window._curRptTitle||'Report';
 
-  // Date filter — same as rpShow mein use hota hai
+  // Date filter — same one used in rpShow
   var filteredFees    =D.fees.filter(f=>_rpDateInRange(f.date));
   var filteredExpenses=D.expenses.filter(e=>_rpDateInRange(e.date));
   var filteredSalaries=D.salaries.filter(s=>_rpSalInRange(s.month));
@@ -11083,7 +11434,7 @@ function refreshBulkSlipPreview(){
   const total=sals.reduce((a,s)=>a+netPay(s),0);
   pre.innerHTML=`<div style="background:var(--g0);border:1px solid var(--g1);border-radius:8px;padding:12px 14px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
     <div>
-      <div style="font-size:13px;font-weight:700;color:var(--g7)">${sals.length} employee${sals.length!==1?'s':''} ke slips print honge</div>
+      <div style="font-size:13px;font-weight:700;color:var(--g7)">${sals.length} employee${sals.length!==1?'s':''} — slip${sals.length!==1?'s':''} will be printed</div>
       <div style="font-size:11px;color:var(--s4);margin-top:2px">Month: ${month} · Total: Rs ${fmt(total)}</div>
     </div>
     <div style="display:flex;gap:6px">${['Paid','Pending'].map(st=>{const c=sals.filter(s=>s.status===st).length;return c>0?`<span style="background:${st==='Paid'?'var(--g1)':'#fef3c7'};color:${st==='Paid'?'var(--g7)':'#92400e'};padding:3px 10px;border-radius:50px;font-size:11px;font-weight:700">${st}: ${c}</span>`:'';}).join('')}</div>
@@ -11198,7 +11549,7 @@ function renderPendingSalAlert(){
       <div style="width:38px;height:38px;border-radius:9px;background:${isMonthEnd?'#fee2e2':'#fef3c7'};display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">${isMonthEnd?'🚨':'⚠️'}</div>
       <div style="flex:1;min-width:200px">
         <div style="font-size:14px;font-weight:700;color:${urgentColor}">
-          ${isMonthEnd?`Month end alert — ${daysLeft} din bache hain!`:'Pending Salary Alert'}
+          ${isMonthEnd?`Month end alert — ${daysLeft} day${daysLeft!==1?'s':''} left!`:'Pending Salary Alert'}
         </div>
         <div style="font-size:12px;color:var(--s5);margin-top:4px;line-height:1.7">
           ${curMonthPending.length>0?`<span style="font-weight:600;color:${urgentColor}">📅 ${curMonth}:</span> ${curMonthPending.length} employee${curMonthPending.length!==1?'s':''} ki salary pending — Rs ${fmt(curMonthPending.reduce((a,s)=>a+netPay(s),0))}<br>`:''}
